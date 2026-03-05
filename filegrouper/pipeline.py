@@ -1,3 +1,5 @@
+"""End-to-end orchestration pipeline joining scan, dedupe, organize and reporting."""
+
 from __future__ import annotations
 
 import threading
@@ -7,8 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from .constants import cache_file_path, reports_dir
 from .duplicate_detector import DuplicateDetector
+from .errors import record_error
 from .hash_cache import HashCacheService
+from .logger import get_logger
 from .models import (
     DedupeMode,
     DuplicateGroup,
@@ -36,6 +41,8 @@ ProgressFn = Callable[[OperationProgress], None]
 
 @dataclass(slots=True)
 class RunOptions:
+    """Inputs controlling a single engine run."""
+
     source_path: Path
     target_path: Path | None
     organization_mode: OrganizationMode
@@ -50,6 +57,8 @@ class RunOptions:
 
 @dataclass(slots=True)
 class RunResult:
+    """Outputs produced by an engine run."""
+
     source_path: Path
     target_path: Path
     summary: OperationSummary
@@ -62,7 +71,15 @@ class RunResult:
 
 
 class FileGrouperEngine:
+    """Coordinate scanner, detector, organizer and report exporter services."""
+
     def __init__(self) -> None:
+        """Initialize composed service graph used by engine runs.
+
+        Returns:
+            None
+        """
+        self.logger = get_logger("pipeline")
         self.scanner = FileScanner()
         self.detector = DuplicateDetector()
         self.organizer = FileOrganizer()
@@ -70,6 +87,16 @@ class FileGrouperEngine:
         self.report_exporter = ReportExporter()
 
     def validate_paths(self, source_path: Path, target_path: Path | None, scope: ExecutionScope) -> str | None:
+        """Validate source/target relationship for selected execution scope.
+
+        Args:
+            source_path: Source directory path.
+            target_path: Target directory path or ``None``.
+            scope: Selected execution scope.
+
+        Returns:
+            str | None: Error message when invalid, otherwise ``None``.
+        """
         if not source_path:
             return "Kaynak klasor secin."
 
@@ -101,8 +128,28 @@ class FileGrouperEngine:
         cancel_event: threading.Event,
         pause_controller: PauseController,
     ) -> RunResult:
+        """Execute configured pipeline stages and return collected result.
+
+        Args:
+            options: Run configuration.
+            log: Optional text log callback.
+            progress: Optional progress callback.
+            cancel_event: Shared cancellation event.
+            pause_controller: Shared pause controller.
+
+        Returns:
+            RunResult: Completed run payload.
+
+        Example:
+            >>> # engine.run(options, log=None, progress=None, ...)
+            >>> # Produces summary, duplicate groups, reports and transaction info.
+        """
         source = ensure_abs(options.source_path)
         target = ensure_abs(options.target_path) if options.target_path else source
+        self.logger.info(
+            "Run started",
+            extra={"transaction_id": ""},
+        )
 
         scanner_errors: list[str] = []
         scanner_skipped: list[str] = []
@@ -119,20 +166,24 @@ class FileGrouperEngine:
 
         duplicate_groups: list[DuplicateGroup] = []
         similar_groups: list[SimilarImageGroup] = []
+        cache: HashCacheService | None = None
         if options.execution_scope.includes_dedupe:
-            cache = HashCacheService(source / ".filegrouper" / "cache" / "hash-cache.json")
-            duplicate_groups, similar_groups = self.detector.find_duplicates(
-                files,
-                cache=cache,
-                detect_similar_images=options.detect_similar_images,
-                similar_max_distance=8,
-                log=log,
-                progress=progress,
-                cancel_event=cancel_event,
-                pause_controller=pause_controller,
-            )
-            if options.detect_similar_images and log is not None:
-                log("Not: Benzer gorseller sadece raporlanir; silme/karantina sadece kesin kopyalara uygulanir.")
+            cache = HashCacheService(cache_file_path(source))
+            try:
+                duplicate_groups, similar_groups = self.detector.find_duplicates(
+                    files,
+                    cache=cache,
+                    detect_similar_images=options.detect_similar_images,
+                    similar_max_distance=8,
+                    log=log,
+                    progress=progress,
+                    cancel_event=cancel_event,
+                    pause_controller=pause_controller,
+                )
+                if options.detect_similar_images and log is not None:
+                    log("Not: Benzer gorseller sadece raporlanir; silme/karantina sadece kesin kopyalara uygulanir.")
+            finally:
+                cache.flush()
 
         summary = self._build_summary(files, duplicate_groups)
         summary.errors.extend(scanner_errors)
@@ -152,6 +203,10 @@ class FileGrouperEngine:
             if not options.dry_run:
                 # Create transaction journal before any filesystem mutation.
                 transaction_path = self.transaction_service.save_transaction(transaction)
+                self.logger.info(
+                    f"Transaction created: {transaction_path}",
+                    extra={"transaction_id": transaction.transaction_id},
+                )
 
             try:
                 to_skip: list[FileRecord] = []
@@ -199,6 +254,10 @@ class FileGrouperEngine:
                         self.transaction_service,
                         transaction_path,
                     )
+                    self.logger.info(
+                        f"Transaction finalized: {transaction_path}",
+                        extra={"transaction_id": transaction.transaction_id if transaction else ""},
+                    )
 
         result = RunResult(
             source_path=source,
@@ -212,6 +271,10 @@ class FileGrouperEngine:
             auto_report_csv_path=None,
         )
         self._auto_export_reports(result, log=log)
+        self.logger.info(
+            "Run completed",
+            extra={"transaction_id": result.transaction_id or ""},
+        )
 
         if progress:
             progress(
@@ -226,6 +289,14 @@ class FileGrouperEngine:
         return result
 
     def build_report(self, result: RunResult) -> OperationReportData:
+        """Create report model from run result with current timestamp.
+
+        Args:
+            result: Completed run output.
+
+        Returns:
+            OperationReportData: Report model to export.
+        """
         return OperationReportData(
             generated_at_utc=datetime.now(tz=timezone.utc),
             source_path=result.source_path,
@@ -239,6 +310,15 @@ class FileGrouperEngine:
 
     @staticmethod
     def _build_summary(files: list[FileRecord], duplicate_groups: list[DuplicateGroup]) -> OperationSummary:
+        """Compute aggregate summary fields from scanned files and duplicate groups.
+
+        Args:
+            files: Scanned file records.
+            duplicate_groups: Duplicate groups found in scan.
+
+        Returns:
+            OperationSummary: Aggregated counters.
+        """
         duplicate_files = sum(max(0, len(group.files) - 1) for group in duplicate_groups)
         duplicate_bytes = sum(group.size_bytes * max(0, len(group.files) - 1) for group in duplicate_groups)
         return OperationSummary(
@@ -250,8 +330,9 @@ class FileGrouperEngine:
         )
 
     def _auto_export_reports(self, result: RunResult, *, log: LogFn | None) -> None:
+        """Write auto JSON/CSV reports under target report directory."""
         try:
-            report_dir = result.target_path / ".filegrouper" / "reports"
+            report_dir = reports_dir(result.target_path)
             report = self.build_report(result)
             json_path, csv_path, _pdf_path = self.report_exporter.export(report, report_dir)
             result.auto_report_json_path = json_path
@@ -259,6 +340,14 @@ class FileGrouperEngine:
             if log:
                 log(f"Rapor yazildi: {json_path.name}, {csv_path.name}")
         except (OSError, IOError) as exc:  # Report export file I/O failures
-            result.summary.errors.append(f"Report export failed: {exc}")
-            if log:
-                log(f"Report export failed: {exc}")
+            message = record_error(
+                result.summary.errors,
+                log=log,
+                operation="Report export failed",
+                path=reports_dir(result.target_path),
+                error=exc,
+            )
+            self.logger.error(
+                message,
+                extra={"transaction_id": result.transaction_id or ""},
+            )

@@ -1,14 +1,24 @@
+"""File organization and duplicate action execution with transaction journaling."""
+
 from __future__ import annotations
 
+import os
 import shutil
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 
 from .classifier import folder_name
-from .errors import OperationCancelledError
+from .constants import (
+    DUPLICATE_PROGRESS_EVERY,
+    ORGANIZE_PROGRESS_EVERY,
+    TX_FLUSH_INTERVAL_SECONDS,
+    TX_FLUSH_UPDATE_THRESHOLD,
+    quarantine_dir,
+)
+from .errors import OperationCancelledError, record_error
 from .models import (
     DedupeMode,
     DuplicateGroup,
@@ -24,6 +34,7 @@ from .models import (
 )
 
 if TYPE_CHECKING:
+    from .pause_controller import PauseController
     from .transaction_service import TransactionService
 
 LogFn = Callable[[str], None]
@@ -31,9 +42,12 @@ ProgressFn = Callable[[OperationProgress], None]
 
 
 class FileOrganizer:
+    """Apply duplicate handling and category/date-based organization."""
+
     def __init__(self) -> None:
-        self._tx_flush_interval_seconds = 1.0
-        self._tx_flush_update_threshold = 25
+        """Initialize transaction flush rate-limit tracking state."""
+        self._tx_flush_interval_seconds = TX_FLUSH_INTERVAL_SECONDS
+        self._tx_flush_update_threshold = TX_FLUSH_UPDATE_THRESHOLD
         self._tx_last_flush_monotonic = 0.0
         self._tx_updates_since_flush = 0
         self._tx_dirty = False
@@ -55,50 +69,56 @@ class FileOrganizer:
         log: LogFn | None,
         progress: ProgressFn | None,
         cancel_event: threading.Event | None,
-        pause_controller=None,
+        pause_controller: PauseController | None = None,
     ) -> list[FileRecord]:
+        """Execute dedupe action for duplicates and return touched file records."""
         if dedupe_mode is DedupeMode.OFF:
             return []
 
-        # Helper: Normalize paths for comparison (Windows case-insensitive safe)
-        def normalize_path_for_comparison(p: str | Path) -> Path:
-            """Convert path to absolute resolved form for reliable comparison."""
+        case_insensitive_fs = os.name == "nt"
+        resolve_cache: dict[Path, str] = {}
+
+        def normalize_path_for_comparison(p: str | Path) -> str:
             if isinstance(p, str):
                 p = Path(p)
-            return p.resolve()
+            if p in resolve_cache:
+                return resolve_cache[p]
+            try:
+                normalized = str(p.resolve())
+            except OSError:
+                normalized = str(p.absolute())
+            if case_insensitive_fs:
+                normalized = normalized.casefold()
+            resolve_cache[p] = normalized
+            return normalized
 
-        # Convert protected_paths to normalized resolved paths
-        protected_paths_normalized = {
-            normalize_path_for_comparison(p) for p in (protected_paths or set())
-        }
+        protected_paths_normalized = {normalize_path_for_comparison(p) for p in (protected_paths or set())}
 
         unique_remove: dict[str, FileRecord] = {}
         for group in duplicate_groups:
             if len(group.files) < 2:
                 continue
 
-            # Find which files should be kept (protected or first in group)
+            normalized_group = [(normalize_path_for_comparison(item.full_path), item) for item in group.files]
             keep_files_normalized = {
-                normalize_path_for_comparison(item.full_path)
-                for item in group.files
-                if normalize_path_for_comparison(item.full_path) in protected_paths_normalized
+                normalized_key
+                for normalized_key, _item in normalized_group
+                if normalized_key in protected_paths_normalized
             }
 
-            if not keep_files_normalized:
-                # If none protected, keep the first file
-                keep_files_normalized = {normalize_path_for_comparison(group.files[0].full_path)}
+            if not keep_files_normalized and normalized_group:
+                keep_files_normalized = {normalized_group[0][0]}
 
-            # Mark duplicates for removal (files not in keep set)
-            for item in group.files:
-                if normalize_path_for_comparison(item.full_path) in keep_files_normalized:
+            for normalized_key, item in normalized_group:
+                if normalized_key in keep_files_normalized:
                     continue
-                unique_remove[str(item.full_path)] = item
+                unique_remove[normalized_key] = item
 
         to_remove = list(unique_remove.values())
         if not to_remove:
             return []
 
-        quarantine_root = target_root / ".filegrouper_quarantine" / datetime.now().strftime("%Y%m%d_%H%M%S")
+        quarantine_root = quarantine_dir(target_root) / datetime.now().strftime("%Y%m%d_%H%M%S")
 
         for index, duplicate in enumerate(to_remove, start=1):
             if cancel_event is not None and cancel_event.is_set():
@@ -118,7 +138,7 @@ class FileOrganizer:
                             action=TransactionAction.DELETED_DUPLICATE,
                             source_path=duplicate.full_path,
                             destination_path=None,
-                            timestamp_utc=datetime.utcnow(),
+                            timestamp_utc=datetime.now(timezone.utc),
                             status=TransactionStatus.PENDING,
                             reversible=False,  # Deleted files cannot be restored
                         )
@@ -143,7 +163,7 @@ class FileOrganizer:
                             action=TransactionAction.QUARANTINED_DUPLICATE,
                             source_path=duplicate.full_path,
                             destination_path=destination,
-                            timestamp_utc=datetime.utcnow(),
+                            timestamp_utc=datetime.now(timezone.utc),
                             status=TransactionStatus.PENDING,
                         )
                         self._append_transaction_entry(
@@ -167,11 +187,16 @@ class FileOrganizer:
                     tx_entry.status = TransactionStatus.FAILED
                     tx_entry.error_message = str(exc)
                     self._flush_transaction(transaction, transaction_service, transaction_file_path)
-                summary.errors.append(f"Could not process duplicate '{duplicate.full_path}': {exc}")
-                if log:
-                    log(f"Could not process duplicate '{duplicate.full_path}': {exc}")
+                record_error(
+                    summary.errors,
+                    log=log,
+                    operation="Could not process duplicate",
+                    path=duplicate.full_path,
+                    error=exc,
+                    context={"dedupe_mode": dedupe_mode.value},
+                )
 
-            if progress and index % 50 == 0:
+            if progress and index % DUPLICATE_PROGRESS_EVERY == 0:
                 progress(
                     OperationProgress(
                         stage=OperationStage.ORGANIZING,
@@ -198,8 +223,9 @@ class FileOrganizer:
         log: LogFn | None,
         progress: ProgressFn | None,
         cancel_event: threading.Event | None,
-        pause_controller=None,
+        pause_controller: PauseController | None = None,
     ) -> None:
+        """Organize non-skipped files into target category/year/month tree."""
         if not dry_run:
             target_root.mkdir(parents=True, exist_ok=True)
 
@@ -218,7 +244,9 @@ class FileOrganizer:
                 continue
 
             local_time = file.last_write_utc.astimezone()
-            destination_folder = target_root / folder_name(file.category) / f"{local_time.year:04d}" / f"{local_time.month:02d}"
+            destination_folder = (
+                target_root / folder_name(file.category) / f"{local_time.year:04d}" / f"{local_time.month:02d}"
+            )
             destination_path = build_unique_path(destination_folder / file.full_path.name)
 
             if dry_run:
@@ -235,7 +263,7 @@ class FileOrganizer:
                     action=tx_action,
                     source_path=file.full_path,
                     destination_path=destination_path,
-                    timestamp_utc=datetime.utcnow(),
+                    timestamp_utc=datetime.now(timezone.utc),
                     status=TransactionStatus.PENDING,
                 )
                 self._append_transaction_entry(
@@ -258,11 +286,16 @@ class FileOrganizer:
                     tx_entry.status = TransactionStatus.FAILED
                     tx_entry.error_message = str(exc)
                     self._flush_transaction(transaction, transaction_service, transaction_file_path)
-                summary.errors.append(f"Could not process '{file.full_path}': {exc}")
-                if log:
-                    log(f"Could not process '{file.full_path}': {exc}")
+                record_error(
+                    summary.errors,
+                    log=log,
+                    operation="Could not process file operation",
+                    path=file.full_path,
+                    error=exc,
+                    context={"mode": mode.value},
+                )
 
-            if progress and index % 50 == 0:
+            if progress and index % ORGANIZE_PROGRESS_EVERY == 0:
                 progress(
                     OperationProgress(
                         stage=OperationStage.ORGANIZING,
@@ -271,7 +304,7 @@ class FileOrganizer:
                         message="Organizing files",
                     )
                 )
-        if progress and total > 0 and last_index % 50 != 0:
+        if progress and total > 0 and last_index % ORGANIZE_PROGRESS_EVERY != 0:
             progress(
                 OperationProgress(
                     stage=OperationStage.ORGANIZING,
@@ -289,6 +322,7 @@ class FileOrganizer:
         transaction_file_path: Path | None,
         entry: TransactionEntry,
     ) -> None:
+        """Append transaction entry and force flush before mutating filesystem."""
         if transaction is None:
             return
         transaction.entries.append(entry)
@@ -303,6 +337,7 @@ class FileOrganizer:
         *,
         force: bool = False,
     ) -> None:
+        """Rate-limited transaction flush helper used during apply operations."""
         if transaction is None or transaction_service is None or transaction_file_path is None:
             return
 
@@ -334,6 +369,7 @@ class FileOrganizer:
         transaction_service: TransactionService | None,
         transaction_file_path: Path | None,
     ) -> None:
+        """Persist final transaction state at end of apply run."""
         self._flush_transaction(
             transaction,
             transaction_service,
@@ -343,6 +379,7 @@ class FileOrganizer:
 
 
 def safe_relative_path(path: Path, root: Path) -> Path:
+    """Return safe relative path; fall back to file name when outside root."""
     try:
         relative = path.resolve().relative_to(root.resolve())
     except ValueError:
@@ -354,6 +391,7 @@ def safe_relative_path(path: Path, root: Path) -> Path:
 
 
 def build_unique_path(path: Path) -> Path:
+    """Build a collision-free file path using numbered suffix strategy."""
     if not path.exists():
         return path
 

@@ -1,16 +1,18 @@
+"""PySide6 desktop interface for previewing and applying file operations."""
+
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
-import traceback
-from dataclasses import dataclass
+import threading
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QObject, Signal, Slot, QThread
+from PySide6.QtCore import Qt, QThread, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QFont
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -23,13 +25,13 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
-    QPushButton,
     QProgressBar,
+    QPushButton,
     QSizePolicy,
     QSpacerItem,
-    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -40,292 +42,32 @@ try:
 except ImportError:
     qdarktheme = None
 
-from .errors import OperationCancelledError
-from .models import DedupeMode, DuplicateGroup, ExecutionScope, OperationProgress, OrganizationMode, ScanFilterOptions
+from .constants import quarantine_dir
+from .gui_components import DuplicateGroupDialog, FiltersDialog, UiFilterDraft, Worker
+from .gui_texts import DEDUPE_ITEMS, MODE_ITEMS, TR, WORKFLOW_ITEMS
+from .gui_theme import apply_gui_theme
+from .logger import configure_logging, get_logger
+from .models import (
+    DedupeMode,
+    DuplicateGroup,
+    ExecutionScope,
+    OperationProgress,
+    OperationSummary,
+    OrganizationMode,
+    ScanFilterOptions,
+)
 from .pause_controller import PauseController
 from .pipeline import FileGrouperEngine, RunOptions, RunResult
 from .utils import format_size
 
 
-# ----------------------------
-# i18n (TR only, clean)
-# ----------------------------
-
-TR = {
-    "title": "ArchiFlow",
-    "subtitle": "Disk düzenleme ve kopya temizleme merkezi",
-    "source": "Kaynak klasör",
-    "target": "Hedef klasör (organize/karantina)",
-    "browse": "Gözat…",
-    "scope": "Kapsam",
-    "workflow": "İş akışı",
-    "flow_all": "Hepsi",
-    "flow_all_desc": "Gruplandırma ve kopya temizleme birlikte çalışır.",
-    "flow_dedupe": "Kopya Analizi",
-    "flow_dedupe_desc": "Sadece kopya analiz/temizleme çalışır.",
-    "flow_group": "Gruplandırma",
-    "flow_group_desc": "Sadece klasörleme ve düzenleme çalışır.",
-    "target_not_needed": "Bu akışta hedef klasör gerekmez.",
-    "mode": "Taşıma modu",
-    "dedupe": "Kopya modu",
-    "dry_run": "Test modu (önerilir)",
-    "similar": "Benzer görselleri analiz et (silinmez)",
-    "similar_unavailable": "Benzer goruntu analizi icin Pillow gerekli.",
-    "filters": "Filtreler…",
-    "preview": "Önizleme",
-    "apply": "Uygula",
-    "pause": "Duraklat",
-    "resume": "Devam",
-    "cancel": "İptal",
-    "undo": "Geri al",
-    "export": "Rapor",
-    "tab_dupes": "Kopyalar",
-    "tab_logs": "Log",
-    "ready": "Hazır",
-    "running": "Çalışıyor…",
-    "paused": "Duraklatıldı",
-    "cancelled": "İptal edildi",
-    "done": "Tamamlandı",
-    "err": "Hata",
-    "need_source": "Kaynak klasör seçmeden başlayamazsın.",
-    "need_target_undo": "Geri alma için hedef klasör gerekli.",
-    "need_preview": "Önce bir önizleme/uygulama çalıştır.",
-    "preview_summary": "Önizleme Özeti",
-    "sum_total": "Toplam dosya",
-    "sum_dupes": "Kopya bulundu",
-    "sum_dupe_groups": "Kopya grup",
-    "sum_reclaim": "Kazanılabilir alan",
-    "sum_quarantine": "Karantinaya gidecek",
-    "sum_organize": "Gruplanacak dosya",
-    "sum_errors": "Hata sayısı",
-    "sum_skipped": "Atlanan dosya",
-    "confirm_apply_title": "Uygulama Onayı",
-    "confirm_apply_text": "İşlem uygulanacak. Devam etmek istiyor musun?",
-    "summary_dialog_title": "Çalışma Özeti",
-    "summary_preview_done": "Önizleme tamamlandı.",
-    "open_quarantine": "Karantina Klasörünü Aç",
-    "quarantine_missing": "Karantina klasörü henüz oluşmadı.",
-    "open_file_location_failed": "Dosya konumu açılamadı.",
-    "dupe_detail": "Grup Detayı",
-}
-
-SCOPE_ITEMS = [
-    ("Grupla + Kopya Temizle", ExecutionScope.GROUP_AND_DEDUPE),
-    ("Sadece Grupla", ExecutionScope.GROUP_ONLY),
-    ("Sadece Kopya Temizle", ExecutionScope.DEDUPE_ONLY),
-]
-MODE_ITEMS = [
-    ("Kopyala", OrganizationMode.COPY),
-    ("Taşı", OrganizationMode.MOVE),
-]
-DEDUPE_ITEMS = [
-    ("Karantina", DedupeMode.QUARANTINE),
-    ("Kapalı", DedupeMode.OFF),
-    ("Sil (tehlikeli)", DedupeMode.DELETE),
-]
-WORKFLOW_ITEMS = [
-    (TR["flow_all"], ExecutionScope.GROUP_AND_DEDUPE, TR["flow_all_desc"]),
-    (TR["flow_dedupe"], ExecutionScope.DEDUPE_ONLY, TR["flow_dedupe_desc"]),
-    (TR["flow_group"], ExecutionScope.GROUP_ONLY, TR["flow_group_desc"]),
-]
-
-
-# ----------------------------
-# Filters dialog
-# ----------------------------
-
-@dataclass
-class UiFilterDraft:
-    include_ext: str = ""
-    exclude_ext: str = ""
-    min_mb: str = ""
-    max_mb: str = ""
-    from_date: str = ""  # YYYY-MM-DD
-    to_date: str = ""    # YYYY-MM-DD
-
-
-class FiltersDialog(QDialog):
-    def __init__(self, parent: QWidget, draft: UiFilterDraft):
-        super().__init__(parent)
-        self.setWindowTitle("Filtreler")
-        self.setModal(True)
-        self.setMinimumWidth(520)
-
-        self.result: UiFilterDraft | None = None
-
-        self.include = QLineEdit(draft.include_ext)
-        self.exclude = QLineEdit(draft.exclude_ext)
-        self.min_mb = QLineEdit(draft.min_mb)
-        self.max_mb = QLineEdit(draft.max_mb)
-        self.from_date = QLineEdit(draft.from_date)
-        self.to_date = QLineEdit(draft.to_date)
-
-        form = QGridLayout()
-        r = 0
-        form.addWidget(QLabel("Sadece uzantılar (örn: jpg,png,mp4)"), r, 0); form.addWidget(self.include, r, 1); r += 1
-        form.addWidget(QLabel("Hariç uzantılar (örn: tmp,ds_store)"), r, 0); form.addWidget(self.exclude, r, 1); r += 1
-        form.addWidget(QLabel("Min boyut (MB)"), r, 0); form.addWidget(self.min_mb, r, 1); r += 1
-        form.addWidget(QLabel("Max boyut (MB)"), r, 0); form.addWidget(self.max_mb, r, 1); r += 1
-        form.addWidget(QLabel("Başlangıç (YYYY-AA-GG)"), r, 0); form.addWidget(self.from_date, r, 1); r += 1
-        form.addWidget(QLabel("Bitiş (YYYY-AA-GG)"), r, 0); form.addWidget(self.to_date, r, 1); r += 1
-
-        btn_row = QHBoxLayout()
-        btn_row.addItem(QSpacerItem(10, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        cancel = QPushButton("Vazgeç")
-        save = QPushButton("Kaydet")
-        save.setDefault(True)
-        btn_row.addWidget(cancel)
-        btn_row.addWidget(save)
-
-        cancel.clicked.connect(self.reject)
-        save.clicked.connect(self._save)
-
-        root = QVBoxLayout()
-        root.addLayout(form)
-        root.addSpacing(10)
-        root.addLayout(btn_row)
-        self.setLayout(root)
-
-    @Slot()
-    def _save(self):
-        self.result = UiFilterDraft(
-            include_ext=self.include.text().strip(),
-            exclude_ext=self.exclude.text().strip(),
-            min_mb=self.min_mb.text().strip(),
-            max_mb=self.max_mb.text().strip(),
-            from_date=self.from_date.text().strip(),
-            to_date=self.to_date.text().strip(),
-        )
-        self.accept()
-
-
-# ----------------------------
-# Duplicate group dialog
-# ----------------------------
-
-class DuplicateGroupDialog(QDialog):
-    def __init__(self, parent: QWidget, group: DuplicateGroup, protected_paths: set[str]):
-        super().__init__(parent)
-        self.group = group
-        self.selected_paths: set[str] | None = None
-
-        self.setWindowTitle("Kopya grubu")
-        self.setModal(True)
-        self.resize(960, 440)
-
-        group_paths = {str(item.full_path).lower() for item in group.files}
-        active_keep = {item for item in protected_paths if item in group_paths}
-        if not active_keep and group.files:
-            active_keep = {str(group.files[0].full_path).lower()}
-
-        root = QVBoxLayout()
-        header = QLabel(f"Hash: {group.sha256_hash[:16]}...   Toplam dosya: {len(group.files)}")
-        header.setStyleSheet("font-weight:600;")
-        hint = QLabel("Koru işaretli dosyalar silinmez/karantinaya alınmaz.")
-        hint.setStyleSheet("color: #6b7280;")
-        root.addWidget(header)
-        root.addWidget(hint)
-
-        self.table = QTableWidget(len(group.files), 4)
-        self.table.setHorizontalHeaderLabels(["Koru", "Boyut", "Tarih", "Dosya"])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setAlternatingRowColors(True)
-
-        for row, file in enumerate(group.files):
-            path_text = str(file.full_path)
-            path_key = path_text.lower()
-
-            keep_item = QTableWidgetItem()
-            keep_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-            keep_item.setCheckState(Qt.Checked if path_key in active_keep else Qt.Unchecked)
-            keep_item.setData(Qt.UserRole, path_key)
-            self.table.setItem(row, 0, keep_item)
-
-            size_item = QTableWidgetItem(format_size(file.size_bytes))
-            size_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignRight)
-            self.table.setItem(row, 1, size_item)
-            self.table.setItem(row, 2, QTableWidgetItem(file.last_write_utc.astimezone().strftime("%Y-%m-%d %H:%M")))
-            self.table.setItem(row, 3, QTableWidgetItem(path_text))
-
-        root.addWidget(self.table, 1)
-
-        actions = QHBoxLayout()
-        actions.addItem(QSpacerItem(10, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        cancel = QPushButton("Vazgeç")
-        save = QPushButton("Seçimi Kaydet")
-        save.setDefault(True)
-        cancel.clicked.connect(self.reject)
-        save.clicked.connect(self._save)
-        actions.addWidget(cancel)
-        actions.addWidget(save)
-        root.addLayout(actions)
-
-        self.setLayout(root)
-
-    @Slot()
-    def _save(self):
-        selected: set[str] = set()
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
-            if item is None:
-                continue
-            if item.checkState() == Qt.Checked:
-                key = item.data(Qt.UserRole)
-                if isinstance(key, str):
-                    selected.add(key)
-
-        if not selected:
-            QMessageBox.warning(self, TR["err"], "En az 1 dosya korunmalı.")
-            return
-
-        self.selected_paths = selected
-        self.accept()
-
-
-# ----------------------------
-# Worker thread
-# ----------------------------
-
-class Worker(QObject):
-    log = Signal(str)
-    progress = Signal(object)  # OperationProgress
-    completed = Signal(object) # RunResult
-    cancelled = Signal()
-    failed = Signal(str)
-
-    def __init__(self, engine: FileGrouperEngine, options: RunOptions, cancel_event, pause_controller: PauseController):
-        super().__init__()
-        self.engine = engine
-        self.options = options
-        self.cancel_event = cancel_event
-        self.pause_controller = pause_controller
-
-    @Slot()
-    def run(self):
-        try:
-            result = self.engine.run(
-                self.options,
-                log=lambda m: self.log.emit(str(m)),
-                progress=lambda p: self.progress.emit(p),
-                cancel_event=self.cancel_event,
-                pause_controller=self.pause_controller,
-            )
-            self.completed.emit(result)
-        except OperationCancelledError:
-            self.cancelled.emit()
-        except Exception as exc:
-            msg = f"{exc}\n\n{traceback.format_exc()}"
-            self.failed.emit(msg)
-
-
-# ----------------------------
-# Main Window
-# ----------------------------
-
 class MainWindow(QMainWindow):
-    def __init__(self):
+    """Main desktop window coordinating user actions and pipeline runs."""
+
+    def __init__(self) -> None:
+        """Initialize main window state, widgets and signal wiring."""
         super().__init__()
+        self.app_logger = get_logger("gui")
         self.engine = FileGrouperEngine()
         self.similar_supported = self.engine.detector.is_similar_supported()
 
@@ -334,9 +76,9 @@ class MainWindow(QMainWindow):
 
         self.filters_draft = UiFilterDraft()
 
-        self.thread: QThread | None = None
+        self.worker_thread: QThread | None = None
         self.worker: Worker | None = None
-        self.cancel_event = None
+        self.cancel_event: threading.Event | None = None
         self.pause_controller = PauseController()
         self.paused = False
         self.last_result: RunResult | None = None
@@ -354,7 +96,7 @@ class MainWindow(QMainWindow):
 
     # ---- UI construction ----
 
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
 
@@ -373,7 +115,7 @@ class MainWindow(QMainWindow):
         title_col.addWidget(self.title_lbl)
         title_col.addWidget(self.sub_lbl)
         title_row.addLayout(title_col)
-        title_row.addItem(QSpacerItem(10, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        title_row.addItem(QSpacerItem(10, 10, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
 
         self.dry_check = QCheckBox(TR["dry_run"])
         self.dry_check.setChecked(True)
@@ -479,7 +221,7 @@ class MainWindow(QMainWindow):
 
         actions.addWidget(self.preview_btn)
         actions.addWidget(self.apply_btn)
-        actions.addItem(QSpacerItem(10, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        actions.addItem(QSpacerItem(10, 10, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
         actions.addWidget(self.pause_btn)
         actions.addWidget(self.cancel_btn)
         root.addLayout(actions)
@@ -493,7 +235,7 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
 
         stat_row.addWidget(self.status_lbl)
-        stat_row.addItem(QSpacerItem(10, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        stat_row.addItem(QSpacerItem(10, 10, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
         stat_row.addWidget(self.progress_lbl)
 
         root.addLayout(stat_row)
@@ -574,14 +316,14 @@ class MainWindow(QMainWindow):
         self.dupe_detail_btn = QPushButton(TR["dupe_detail"])
         self.dupe_detail_btn.clicked.connect(self._open_selected_duplicate_group_dialog)
         dupes_toolbar.addWidget(self.dupe_detail_btn)
-        dupes_toolbar.addItem(QSpacerItem(10, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        dupes_toolbar.addItem(QSpacerItem(10, 10, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
         dupes_layout.addLayout(dupes_toolbar)
 
         self.dupes_table = QTableWidget(0, 4)
         self.dupes_table.setHorizontalHeaderLabels(["Hash", "Kaldır", "Boyut", "Koru/Kalacak"])
         self.dupes_table.horizontalHeader().setStretchLastSection(True)
-        self.dupes_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.dupes_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.dupes_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.dupes_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.dupes_table.setAlternatingRowColors(True)
         self.dupes_table.setToolTip("Cift tiklayinca dosya konumu acilir.")
         self.dupes_table.cellDoubleClicked.connect(self._open_duplicate_location_from_table)
@@ -605,14 +347,14 @@ class MainWindow(QMainWindow):
 
         toolbar.addWidget(self.clear_logs_btn)
         toolbar.addWidget(self.open_quarantine_btn)
-        toolbar.addItem(QSpacerItem(10, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        toolbar.addItem(QSpacerItem(10, 10, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
         toolbar.addWidget(self.undo_btn)
         toolbar.addWidget(self.export_btn)
         logs_layout.addLayout(toolbar)
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setLineWrapMode(QTextEdit.NoWrap)
+        self.log_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         logs_layout.addWidget(self.log_text)
 
         self.tabs.addTab(logs_wrap, TR["tab_logs"])
@@ -627,7 +369,7 @@ class MainWindow(QMainWindow):
 
     # ---- actions ----
 
-    def _browse_source(self):
+    def _browse_source(self) -> None:
         path = QFileDialog.getExistingDirectory(self, TR["source"])
         if path:
             self.source_edit.setText(path)
@@ -635,20 +377,21 @@ class MainWindow(QMainWindow):
                 p = Path(path)
                 self.target_edit.setText(str(p.parent / f"{p.name}_Organized"))
 
-    def _browse_target(self):
+    def _browse_target(self) -> None:
         path = QFileDialog.getExistingDirectory(self, TR["target"])
         if path:
             self.target_edit.setText(path)
 
-    def _open_filters(self):
+    def _open_filters(self) -> None:
         dlg = FiltersDialog(self, self.filters_draft)
-        if dlg.exec() == QDialog.Accepted and dlg.result is not None:
-            self.filters_draft = dlg.result
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.filter_result is not None:
+            self.filters_draft = dlg.filter_result
             self._log("Filtreler güncellendi.")
 
-    def _open_quarantine_folder(self):
+    def _open_quarantine_folder(self) -> None:
         source_text = self.source_edit.text().strip()
         target_text = self.target_edit.text().strip()
+        base: Path | None
         if self.last_result is not None:
             base = self.last_result.target_path
         else:
@@ -656,13 +399,13 @@ class MainWindow(QMainWindow):
         if base is None:
             QMessageBox.information(self, TR["open_quarantine"], TR["quarantine_missing"])
             return
-        folder = base / ".filegrouper_quarantine"
+        folder = quarantine_dir(base)
         if not folder.exists():
             QMessageBox.information(self, TR["open_quarantine"], TR["quarantine_missing"])
             return
         self._open_path_in_file_manager(folder)
 
-    def _toggle_pause(self):
+    def _toggle_pause(self) -> None:
         if not self._is_running():
             return
         self.paused = not self.paused
@@ -675,20 +418,20 @@ class MainWindow(QMainWindow):
             self._set_status(TR["running"])
             self.pause_btn.setText(TR["pause"])
 
-    def _cancel_run(self):
+    def _cancel_run(self) -> None:
         if not self._is_running():
             return
         if self.cancel_event is not None:
             self.cancel_event.set()
 
-    def _open_selected_duplicate_group_dialog(self):
+    def _open_selected_duplicate_group_dialog(self) -> None:
         row = self.dupes_table.currentRow()
         if row < 0:
             return
         self._open_duplicate_group_dialog(row, 0)
 
     @Slot(int)
-    def _on_workflow_changed(self, index: int):
+    def _on_workflow_changed(self, index: int) -> None:
         if index < 0 or index >= len(WORKFLOW_ITEMS):
             return
         scope = WORKFLOW_ITEMS[index][1]
@@ -715,14 +458,14 @@ class MainWindow(QMainWindow):
             self.similar_check.setChecked(False)
             self.similar_check.setEnabled(False)
 
-    def _undo_last(self):
+    def _undo_last(self) -> None:
         target_text = self.target_edit.text().strip()
         if not target_text:
             QMessageBox.warning(self, TR["err"], TR["need_target_undo"])
             return
         try:
             summary = self.engine.transaction_service.undo_last_transaction(Path(target_text))
-        except Exception as exc:
+        except (RuntimeError, OSError, IOError, ValueError) as exc:
             QMessageBox.critical(self, TR["err"], str(exc))
             return
 
@@ -730,7 +473,7 @@ class MainWindow(QMainWindow):
         self._set_status("Geri alındı")
         self._log("Undo tamamlandı.")
 
-    def _export_report(self):
+    def _export_report(self) -> None:
         if self.last_result is None:
             QMessageBox.warning(self, TR["err"], TR["need_preview"])
             return
@@ -743,7 +486,7 @@ class MainWindow(QMainWindow):
 
     # ---- run pipeline ----
 
-    def _start_run(self, apply_changes: bool):
+    def _start_run(self, apply_changes: bool) -> None:
         if self._is_running():
             return
 
@@ -772,9 +515,9 @@ class MainWindow(QMainWindow):
                 self,
                 "Tehlikeli İşlem",
                 "Kopya modu 'Sil' ve test modu kapalı.\nBu işlem geri alınamaz.\nEmin misin?",
-                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
-            if ok != QMessageBox.Yes:
+            if ok != QMessageBox.StandardButton.Yes:
                 return
 
         # reset ui
@@ -792,8 +535,7 @@ class MainWindow(QMainWindow):
         self._set_preview_summary(None)
 
         # thread init
-        import threading as _th
-        self.cancel_event = _th.Event()
+        self.cancel_event = threading.Event()
         self.pause_controller = PauseController()
         self.paused = False
         self.pause_btn.setText(TR["pause"])
@@ -814,11 +556,11 @@ class MainWindow(QMainWindow):
         self.last_run_dedupe_mode = self._dedupe_enum()
         self.last_run_apply_changes = apply_changes
 
-        self.thread = QThread()
+        self.worker_thread = QThread()
         self.worker = Worker(self.engine, options, self.cancel_event, self.pause_controller)
-        self.worker.moveToThread(self.thread)
+        self.worker.moveToThread(self.worker_thread)
 
-        self.thread.started.connect(self.worker.run)
+        self.worker_thread.started.connect(self.worker.run)
         self.worker.log.connect(self._log)
         self.worker.progress.connect(self._on_progress)
         self.worker.completed.connect(self._on_complete)
@@ -826,24 +568,24 @@ class MainWindow(QMainWindow):
         self.worker.failed.connect(self._on_failed)
 
         # cleanup
-        self.worker.completed.connect(self.thread.quit)
-        self.worker.cancelled.connect(self.thread.quit)
-        self.worker.failed.connect(self.thread.quit)
-        self.thread.finished.connect(self._thread_finished)
+        self.worker.completed.connect(self.worker_thread.quit)
+        self.worker.cancelled.connect(self.worker_thread.quit)
+        self.worker.failed.connect(self.worker_thread.quit)
+        self.worker_thread.finished.connect(self._thread_finished)
 
         self._set_running(True)
-        self.thread.start()
+        self.worker_thread.start()
 
     @Slot()
-    def _thread_finished(self):
+    def _thread_finished(self) -> None:
         self._set_running(False)
-        self.thread = None
+        self.worker_thread = None
         self.worker = None
 
     # ---- signals from worker ----
 
     @Slot(object)
-    def _on_progress(self, p: OperationProgress):
+    def _on_progress(self, p: OperationProgress) -> None:
         if p.total_files > 0:
             percent = min(100, int((p.processed_files / p.total_files) * 100))
             self.progress.setValue(percent)
@@ -852,14 +594,12 @@ class MainWindow(QMainWindow):
             self._set_status(p.message)
 
     @Slot(object)
-    def _on_complete(self, result: RunResult):
+    def _on_complete(self, result: RunResult) -> None:
         self.last_result = result
         s = result.summary
         self.preview_duplicate_groups = result.duplicate_groups
         self.protected_duplicate_paths = {
-            str(group.files[0].full_path).lower()
-            for group in result.duplicate_groups
-            if group.files
+            str(group.files[0].full_path).lower() for group in result.duplicate_groups if group.files
         }
 
         self._set_metrics_from_summary(s, similar_count=len(result.similar_image_groups))
@@ -881,7 +621,9 @@ class MainWindow(QMainWindow):
         for group_index, group in enumerate(result.duplicate_groups[:visible_limit]):
             self._add_dupe_row(group_index)
         if len(result.duplicate_groups) > visible_limit:
-            self._log(f"Not: {len(result.duplicate_groups) - visible_limit} kopya grup performans icin tabloda gosterilmedi.")
+            self._log(
+                f"Not: {len(result.duplicate_groups) - visible_limit} kopya grup performans icin tabloda gosterilmedi."
+            )
 
         for err in s.errors:
             self._log(f"ERROR: {err}")
@@ -897,14 +639,15 @@ class MainWindow(QMainWindow):
             )
 
     @Slot()
-    def _on_cancelled(self):
+    def _on_cancelled(self) -> None:
         self._set_status(TR["cancelled"])
         self._log("İşlem iptal edildi.")
 
     @Slot(str)
-    def _on_failed(self, msg: str):
+    def _on_failed(self, msg: str) -> None:
         self._set_status(TR["err"])
         self._log("ERROR: " + msg)
+        self.app_logger.error(msg, extra={"transaction_id": ""})
         QMessageBox.critical(self, TR["err"], "Bir hata oluştu.\nDetay log sekmesinde.")
 
     # ---- helpers ----
@@ -937,7 +680,7 @@ class MainWindow(QMainWindow):
             except ValueError:
                 return None
 
-        def parse_date(raw: str):
+        def parse_date(raw: str) -> datetime | None:
             t = raw.strip()
             if not t:
                 return None
@@ -957,7 +700,7 @@ class MainWindow(QMainWindow):
             exclude_system=True,
         )
 
-    def _set_running(self, running: bool):
+    def _set_running(self, running: bool) -> None:
         self.preview_btn.setEnabled(not running)
         self.apply_btn.setEnabled(not running)
         self.filters_btn.setEnabled(not running)
@@ -976,29 +719,30 @@ class MainWindow(QMainWindow):
         self._on_workflow_changed(self.workflow_tabs.currentIndex())
 
     def _is_running(self) -> bool:
-        return self.thread is not None and self.thread.isRunning()
+        return self.worker_thread is not None and self.worker_thread.isRunning()
 
-    def _set_status(self, text: str):
+    def _set_status(self, text: str) -> None:
         self.status_lbl.setText(text)
 
-    def _log(self, msg: str):
+    def _log(self, msg: str) -> None:
         self.log_text.append(msg)
+        self.app_logger.info(msg, extra={"transaction_id": ""})
 
-    def _clear_logs(self):
+    def _clear_logs(self) -> None:
         self.log_text.clear()
 
-    def _clear_dupes_table(self):
+    def _clear_dupes_table(self) -> None:
         self.dupes_table.setRowCount(0)
 
-    def _open_duplicate_location_from_table(self, row: int, _column: int):
+    def _open_duplicate_location_from_table(self, row: int, _column: int) -> None:
         first = self.dupes_table.item(row, 0)
         if first is None:
             return
-        open_path = first.data(Qt.UserRole + 1)
+        open_path = first.data(int(Qt.ItemDataRole.UserRole) + 1)
         if isinstance(open_path, str) and open_path.strip():
             self._open_path_in_file_manager(Path(open_path))
             return
-        group_index = first.data(Qt.UserRole)
+        group_index = first.data(Qt.ItemDataRole.UserRole)
         if not isinstance(group_index, int):
             return
         if group_index < 0 or group_index >= len(self.preview_duplicate_groups):
@@ -1008,11 +752,11 @@ class MainWindow(QMainWindow):
             return
         self._open_path_in_file_manager(group.files[0].full_path)
 
-    def _open_duplicate_group_dialog(self, row: int, _column: int):
+    def _open_duplicate_group_dialog(self, row: int, _column: int) -> None:
         first = self.dupes_table.item(row, 0)
         if first is None:
             return
-        group_index = first.data(Qt.UserRole)
+        group_index = first.data(Qt.ItemDataRole.UserRole)
         if not isinstance(group_index, int):
             return
         if group_index < 0 or group_index >= len(self.preview_duplicate_groups):
@@ -1020,7 +764,7 @@ class MainWindow(QMainWindow):
 
         group = self.preview_duplicate_groups[group_index]
         dlg = DuplicateGroupDialog(self, group, self.protected_duplicate_paths)
-        if dlg.exec() != QDialog.Accepted or dlg.selected_paths is None:
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.selected_paths is None:
             return
 
         group_paths = {str(item.full_path).lower() for item in group.files}
@@ -1029,13 +773,12 @@ class MainWindow(QMainWindow):
         self._refresh_dupe_row(row, group_index)
         self._log(f"Kopya grubu secimi guncellendi: {group.sha256_hash[:12]}..")
 
-    def _refresh_dupe_row(self, row: int, group_index: int):
+    def _refresh_dupe_row(self, row: int, group_index: int) -> None:
         if group_index < 0 or group_index >= len(self.preview_duplicate_groups):
             return
         group = self.preview_duplicate_groups[group_index]
         protected_files = [
-            item for item in group.files
-            if str(item.full_path).lower() in self.protected_duplicate_paths
+            item for item in group.files if str(item.full_path).lower() in self.protected_duplicate_paths
         ]
         keep_count = len(protected_files)
         if keep_count <= 0 and group.files:
@@ -1053,20 +796,25 @@ class MainWindow(QMainWindow):
             item = self.dupes_table.item(row, c) or QTableWidgetItem()
             item.setText(val)
             if c == 0:
-                item.setData(Qt.UserRole, group_index)
-                item.setData(Qt.UserRole + 1, str(selected_file.full_path) if selected_file is not None else "")
+                item.setData(Qt.ItemDataRole.UserRole, group_index)
+                item.setData(
+                    int(Qt.ItemDataRole.UserRole) + 1, str(selected_file.full_path) if selected_file is not None else ""
+                )
             if c in (0, 1, 2):
-                item.setTextAlignment(Qt.AlignVCenter | (Qt.AlignRight if c == 2 else Qt.AlignLeft))
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignVCenter
+                    | (Qt.AlignmentFlag.AlignRight if c == 2 else Qt.AlignmentFlag.AlignLeft)
+                )
             self.dupes_table.setItem(row, c, item)
 
-    def _add_dupe_row(self, group_index: int):
+    def _add_dupe_row(self, group_index: int) -> None:
         if group_index < 0 or group_index >= len(self.preview_duplicate_groups):
             return
         r = self.dupes_table.rowCount()
         self.dupes_table.insertRow(r)
         self._refresh_dupe_row(r, group_index)
 
-    def _set_metrics_from_summary(self, summary, similar_count: int):
+    def _set_metrics_from_summary(self, summary: OperationSummary, similar_count: int) -> None:
         self.m_total.setText(str(summary.total_files_scanned))
         self.m_size.setText(format_size(summary.total_bytes_scanned))
         self.m_dupes.setText(str(summary.duplicate_files_found))
@@ -1074,7 +822,12 @@ class MainWindow(QMainWindow):
         self.m_errors.setText(str(len(summary.errors)))
         self.m_similar.setText(str(similar_count))
 
-    def _set_preview_summary(self, summary, quarantine_count: int = 0, organize_count: int = 0):
+    def _set_preview_summary(
+        self,
+        summary: OperationSummary | None,
+        quarantine_count: int = 0,
+        organize_count: int = 0,
+    ) -> None:
         if summary is None:
             self.p_total.setText("0")
             self.p_dupes.setText("0")
@@ -1094,7 +847,13 @@ class MainWindow(QMainWindow):
         self.p_errors.setText(str(len(summary.errors)))
         self.p_skipped.setText(str(len(summary.skipped_files)))
 
-    def _summary_text(self, summary, *, quarantine_count: int | None, organize_count: int | None) -> str:
+    def _summary_text(
+        self,
+        summary: OperationSummary,
+        *,
+        quarantine_count: int | None,
+        organize_count: int | None,
+    ) -> str:
         lines = []
         lines.append(f"{TR['sum_total']}: {summary.total_files_scanned}")
         lines.append(f"{TR['sum_dupe_groups']}: {summary.duplicate_group_count}")
@@ -1112,7 +871,7 @@ class MainWindow(QMainWindow):
         self,
         *,
         title: str,
-        summary,
+        summary: OperationSummary,
         quarantine_count: int | None,
         organize_count: int | None,
         include_quarantine: bool,
@@ -1153,11 +912,11 @@ class MainWindow(QMainWindow):
             self,
             TR["confirm_apply_title"],
             "\n".join(lines),
-            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        return ok == QMessageBox.Yes
+        return bool(ok == QMessageBox.StandardButton.Yes)
 
-    def _open_path_in_file_manager(self, path: Path):
+    def _open_path_in_file_manager(self, path: Path) -> None:
         try:
             if sys.platform == "darwin":
                 subprocess.run(["open", "-R", str(path)], check=False)
@@ -1166,10 +925,11 @@ class MainWindow(QMainWindow):
             else:
                 target = path if path.is_dir() else path.parent
                 subprocess.run(["xdg-open", str(target)], check=False)
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             QMessageBox.warning(self, TR["err"], TR["open_file_location_failed"])
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        """Intercept close to cancel active run safely before exit."""
         if not self._is_running():
             super().closeEvent(event)
             return
@@ -1179,9 +939,9 @@ class MainWindow(QMainWindow):
             self.cancel_event.set()
         self.pause_controller.resume()
 
-        if self.thread is not None:
-            self.thread.wait(3000)
-            if self.thread.isRunning():
+        if self.worker_thread is not None:
+            self.worker_thread.wait(3000)
+            if self.worker_thread.isRunning():
                 QMessageBox.warning(
                     self,
                     TR["err"],
@@ -1194,103 +954,21 @@ class MainWindow(QMainWindow):
 
 
 def launch_gui() -> None:
+    """Create Qt application, apply theme and start event loop.
+
+    Example:
+        >>> # launch_gui()
+        >>> # Starts the desktop app event loop.
+    """
+    log_path = configure_logging()
+    app_logger = get_logger("gui")
     app = QApplication(sys.argv)
+    app_logger.info(f"GUI started. log_file={log_path}", extra={"transaction_id": ""})
 
     # Better fonts on macOS/Win
     app.setFont(QFont("SF Pro Text", 11))
 
-    # Theme: try qdarktheme, otherwise use a clean built-in light stylesheet
-    themed = False
-    if qdarktheme is not None:
-        # qdarktheme has had different APIs across versions.
-        for fn_name in ("setup_theme", "load_stylesheet"):
-            fn = getattr(qdarktheme, fn_name, None)
-            if callable(fn):
-                try:
-                    if fn_name == "setup_theme":
-                        fn("light")
-                    else:
-                        # Some versions expose load_stylesheet() -> str
-                        css = fn(theme="light") if "theme" in fn.__code__.co_varnames else fn()
-                        if isinstance(css, str) and css.strip():
-                            app.setStyleSheet(css)
-                    themed = True
-                    break
-                except Exception:
-                    pass
-
-    if not themed:
-        # Minimal modern light theme (no external dependency)
-        app.setStyleSheet("""
-            QWidget { background: #f6f7f9; color: #111827; font-size: 12px; }
-            QGroupBox { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px; margin-top: 10px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #6b7280; }
-            QLineEdit, QComboBox, QSpinBox, QDateEdit {
-                background: #ffffff;
-                border: 1px solid #d1d5db;
-                border-radius: 8px;
-                padding: 8px 10px;
-            }
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDateEdit:focus {
-                border: 1px solid #2563eb;
-            }
-            QPushButton {
-                background: #ffffff;
-                border: 1px solid #d1d5db;
-                border-radius: 10px;
-                padding: 9px 14px;
-            }
-            QPushButton:hover { background: #f3f4f6; }
-            QPushButton:pressed { background: #e5e7eb; }
-            QPushButton:disabled { color: #9ca3af; border-color: #e5e7eb; background: #f9fafb; }
-
-            QProgressBar {
-                background: #eef2f7;
-                border: 1px solid #e5e7eb;
-                border-radius: 9px;
-                text-align: center;
-                height: 18px;
-            }
-            QProgressBar::chunk {
-                background: #2563eb;
-                border-radius: 9px;
-            }
-
-            QTabWidget::pane { border: 1px solid #e5e7eb; border-radius: 10px; background: #ffffff; }
-            QTabBar::tab {
-                background: #f3f4f6;
-                border: 1px solid #e5e7eb;
-                border-bottom: none;
-                padding: 10px 14px;
-                border-top-left-radius: 10px;
-                border-top-right-radius: 10px;
-                color: #374151;
-                margin-right: 6px;
-            }
-            QTabBar::tab:selected { background: #ffffff; color: #111827; }
-
-            QHeaderView::section {
-                background: #f9fafb;
-                border: 1px solid #e5e7eb;
-                padding: 8px 10px;
-                color: #374151;
-                font-weight: 600;
-            }
-            QTableWidget {
-                background: #ffffff;
-                border: 1px solid #e5e7eb;
-                border-radius: 10px;
-                gridline-color: #f1f5f9;
-                selection-background-color: #dbeafe;
-                selection-color: #111827;
-            }
-            QTextEdit {
-                background: #ffffff;
-                border: 1px solid #e5e7eb;
-                border-radius: 10px;
-                padding: 10px;
-            }
-        """)
+    apply_gui_theme(app, qdarktheme)
 
     w = MainWindow()
     w.show()

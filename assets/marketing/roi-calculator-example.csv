@@ -1,0 +1,10 @@
+metric,value,unit,notes
+daily_time_lost,1.5,hours,Average time lost per person per day
+team_size,6,people,Active users in team
+hourly_cost,20,USD,Blended hourly personnel cost
+work_days_per_year,220,days,Business days per year
+efficiency_gain,0.30,ratio,Estimated improvement with ArchiFlow
+annual_license_cost,600,USD,Total yearly license spend
+annual_savings,11880,USD,Computed savings before license
+net_gain,11280,USD,annual_savings - annual_license_cost
+roi_percent,1880,percent,(net_gain / annual_license_cost) * 100

@@ -1,0 +1,36 @@
+{
+  "generated_at_utc": "2026-03-05T14:15:27.498364+00:00",
+  "source": "/private/tmp/archiflow_perf_smoke",
+  "dataset": {
+    "files_created": 300,
+    "bytes_written": 49308672,
+    "duplicate_files": 60,
+    "same_size_variant_files": 30
+  },
+  "benchmark": {
+    "iterations": 1,
+    "elapsed_seconds": {
+      "min": 0.37925512500078185,
+      "max": 0.37925512500078185,
+      "avg": 0.37925512500078185
+    },
+    "peak_memory_bytes": {
+      "min": 3596086,
+      "max": 3596086,
+      "avg": 3596086.0
+    },
+    "summary": {
+      "total_files_scanned": 300,
+      "total_bytes_scanned": 49308672,
+      "duplicate_group_count": 30,
+      "duplicate_files_found": 30,
+      "duplicate_bytes_reclaimable": 3269632,
+      "files_copied": 0,
+      "files_moved": 0,
+      "duplicates_quarantined": 0,
+      "duplicates_deleted": 0,
+      "errors": [],
+      "skipped_files": []
+    }
+  }
+}

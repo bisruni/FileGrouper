@@ -9,3 +9,14 @@ venv/
 .mypy_cache/
 .pytest_cache/
 .DS_Store
+build/
+dist/
+*.spec
+*.egg-info/
+.filegrouper/
+.filegrouper_quarantine/
+docs/_build/
+docs/api/generated/
+.coverage
+coverage.xml
+htmlcov/

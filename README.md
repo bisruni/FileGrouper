@@ -107,6 +107,100 @@ python3 main.py apply \
 - Her islemde JSON+CSV raporu otomatik yazilir: `.filegrouper/reports/`
 - `Son Islemi Geri Al` transaction kaydina gore calisir.
 
+## Dokumantasyon
+
+Sphinx dokumantasyonunu derlemek icin:
+
+```bash
+python3 -m pip install -e .[dev]
+make -C docs html
+```
+
+HTML cikti klasoru: `docs/_build/html/`
+
+## Test ve CI
+
+Yerel test:
+
+```bash
+pytest
+```
+
+`tox` ile coklu Python surumu:
+
+```bash
+tox
+```
+
+Pre-commit hook kurulumu:
+
+```bash
+pre-commit install
+pre-commit run --all-files
+```
+
+CI pipeline dosyasi: `.github/workflows/ci.yml`
+
+## QA Kontrolleri
+
+Tek tek calistirma:
+
+```bash
+black --check filegrouper tests main.py
+isort --check-only filegrouper tests main.py
+flake8 filegrouper tests main.py
+mypy filegrouper
+```
+
+Tek komut akisi (`tox`):
+
+```bash
+tox -e format
+tox -e lint
+tox -e type
+tox -e py313
+```
+
+## Performans Benchmark (Faz 3.5)
+
+Performans araclari `tests/performance/` altindadir.
+
+Dataset uret + benchmark calistir:
+
+```bash
+python tests/performance/run_benchmark.py \
+  --source /tmp/archiflow_perf \
+  --generate \
+  --files 5000 \
+  --duplicate-ratio 0.2 \
+  --same-size-ratio 0.1 \
+  --iterations 2
+```
+
+Baseline regression kontrolu:
+
+```bash
+python tests/performance/run_benchmark.py \
+  --source /tmp/archiflow_perf \
+  --iterations 3 \
+  --baseline tests/performance/baseline_example.json \
+  --max-time-regression 1.2 \
+  --max-memory-regression 1.2
+```
+
+## Logging
+
+- Logger: `filegrouper/logger.py`
+- Varsayilan log dosyasi: `./.filegrouper/logs/archiflow.log`
+- Rotating file handler: 5 MB x 5 backup
+- Format: key=value structured log (`ts`, `level`, `logger`, `module`, `line`, `msg`)
+
+Ortam degiskenleri:
+
+- `ARCHIFLOW_LOG_LEVEL` (ornek: `DEBUG`, `INFO`, `WARNING`, `ERROR`)
+- `ARCHIFLOW_CONSOLE_LOG_LEVEL` (varsayilan: `WARNING`)
+- `ARCHIFLOW_LOG_DIR` (ozel log klasoru)
+
 ## Not
 
 Bu repo artik Python ana uygulamasini icerir. Eski .NET dosyalari kaynakta duruyor olabilir,

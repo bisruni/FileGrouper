@@ -1,0 +1,36 @@
+{
+  "generated_at_utc": "2026-01-01T00:00:00+00:00",
+  "source": "/tmp/archiflow_perf",
+  "dataset": {
+    "files_created": 5000,
+    "bytes_written": 200000000,
+    "duplicate_files": 1000,
+    "same_size_variant_files": 500
+  },
+  "benchmark": {
+    "iterations": 2,
+    "elapsed_seconds": {
+      "min": 2.1,
+      "max": 2.4,
+      "avg": 2.25
+    },
+    "peak_memory_bytes": {
+      "min": 40000000,
+      "max": 45000000,
+      "avg": 42500000
+    },
+    "summary": {
+      "total_files_scanned": 5000,
+      "total_bytes_scanned": 200000000,
+      "duplicate_group_count": 500,
+      "duplicate_files_found": 500,
+      "duplicate_bytes_reclaimable": 50000000,
+      "files_copied": 0,
+      "files_moved": 0,
+      "duplicates_quarantined": 0,
+      "duplicates_deleted": 0,
+      "errors": [],
+      "skipped_files": []
+    }
+  }
+}

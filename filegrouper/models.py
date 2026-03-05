@@ -1,3 +1,5 @@
+"""Domain models and enums shared across CLI, GUI and services."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,6 +10,8 @@ from typing import Any
 
 
 class FileCategory(str, Enum):
+    """High-level file categories used for organization."""
+
     IMAGE = "image"
     VIDEO = "video"
     AUDIO = "audio"
@@ -18,31 +22,41 @@ class FileCategory(str, Enum):
 
 
 class OrganizationMode(str, Enum):
+    """Organization operation mode."""
+
     COPY = "copy"
     MOVE = "move"
 
 
 class DedupeMode(str, Enum):
+    """Duplicate handling mode."""
+
     OFF = "off"
     QUARANTINE = "quarantine"
     DELETE = "delete"
 
 
 class ExecutionScope(str, Enum):
+    """Scope that selects which pipeline stages will run."""
+
     GROUP_AND_DEDUPE = "group_and_dedupe"
     GROUP_ONLY = "group_only"
     DEDUPE_ONLY = "dedupe_only"
 
     @property
     def includes_grouping(self) -> bool:
+        """Return whether grouping/organizing stage is included."""
         return self is not ExecutionScope.DEDUPE_ONLY
 
     @property
     def includes_dedupe(self) -> bool:
+        """Return whether duplicate analysis/cleanup stage is included."""
         return self is not ExecutionScope.GROUP_ONLY
 
 
 class OperationStage(str, Enum):
+    """Pipeline progress stages used by UI and CLI."""
+
     IDLE = "idle"
     SCANNING = "scanning"
     HASHING = "hashing"
@@ -54,6 +68,8 @@ class OperationStage(str, Enum):
 
 
 class TransactionAction(str, Enum):
+    """Action types tracked in transaction journal entries."""
+
     COPIED = "copied"
     MOVED = "moved"
     QUARANTINED_DUPLICATE = "quarantined_duplicate"
@@ -61,6 +77,8 @@ class TransactionAction(str, Enum):
 
 
 class TransactionStatus(str, Enum):
+    """Lifecycle state of a transaction entry."""
+
     PENDING = "pending"
     DONE = "done"
     FAILED = "failed"
@@ -68,6 +86,8 @@ class TransactionStatus(str, Enum):
 
 @dataclass(slots=True)
 class FileRecord:
+    """Normalized scanned file metadata."""
+
     full_path: Path
     extension: str
     size_bytes: int
@@ -75,6 +95,7 @@ class FileRecord:
     category: FileCategory
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize record into JSON-compatible dictionary."""
         return {
             "full_path": str(self.full_path),
             "extension": self.extension,
@@ -86,11 +107,14 @@ class FileRecord:
 
 @dataclass(slots=True)
 class DuplicateGroup:
+    """Group of byte-identical files represented by shared SHA-256 hash."""
+
     sha256_hash: str
     size_bytes: int
     files: list[FileRecord]
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize duplicate group into JSON-compatible dictionary."""
         return {
             "sha256_hash": self.sha256_hash,
             "size_bytes": self.size_bytes,
@@ -100,11 +124,14 @@ class DuplicateGroup:
 
 @dataclass(slots=True)
 class SimilarImageGroup:
+    """Anchor image and visually similar image paths."""
+
     anchor_path: Path
     similar_paths: list[Path]
     max_distance: int
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize similar-image group into JSON-compatible dictionary."""
         return {
             "anchor_path": str(self.anchor_path),
             "similar_paths": [str(path) for path in self.similar_paths],
@@ -114,6 +141,8 @@ class SimilarImageGroup:
 
 @dataclass(slots=True)
 class OperationProgress:
+    """Progress event payload emitted during pipeline execution."""
+
     stage: OperationStage
     processed_files: int
     total_files: int
@@ -122,6 +151,8 @@ class OperationProgress:
 
 @dataclass(slots=True)
 class ScanFilterOptions:
+    """Filter options applied while scanning filesystem entries."""
+
     include_extensions: list[str] = field(default_factory=list)
     exclude_extensions: list[str] = field(default_factory=list)
     min_size_bytes: int | None = None
@@ -133,6 +164,7 @@ class ScanFilterOptions:
 
     @staticmethod
     def normalize_extension(extension: str | None) -> str:
+        """Normalize extension text into canonical '.ext' or empty string."""
         if not extension:
             return ""
         extension = extension.strip().lower()
@@ -143,6 +175,7 @@ class ScanFilterOptions:
         return extension
 
     def is_match(self, path: Path) -> bool:
+        """Return True when path metadata matches active filter constraints."""
         include = {self.normalize_extension(item) for item in self.include_extensions if item.strip()}
         exclude = {self.normalize_extension(item) for item in self.exclude_extensions if item.strip()}
 
@@ -178,6 +211,8 @@ class ScanFilterOptions:
 
 @dataclass(slots=True)
 class OperationSummary:
+    """Aggregated counters and errors produced by a run."""
+
     total_files_scanned: int = 0
     total_bytes_scanned: int = 0
     duplicate_group_count: int = 0
@@ -191,6 +226,7 @@ class OperationSummary:
     skipped_files: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize summary into JSON-compatible dictionary."""
         return {
             "total_files_scanned": self.total_files_scanned,
             "total_bytes_scanned": self.total_bytes_scanned,
@@ -208,6 +244,8 @@ class OperationSummary:
 
 @dataclass(slots=True)
 class OperationProfile:
+    """Reusable profile of run options for GUI/CLI convenience."""
+
     name: str
     execution_scope: ExecutionScope = ExecutionScope.GROUP_AND_DEDUPE
     organization_mode: OrganizationMode = OrganizationMode.COPY
@@ -217,6 +255,7 @@ class OperationProfile:
     filter_options: ScanFilterOptions = field(default_factory=ScanFilterOptions)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize profile into JSON-compatible dictionary."""
         return {
             "name": self.name,
             "execution_scope": self.execution_scope.value,
@@ -238,6 +277,7 @@ class OperationProfile:
 
     @staticmethod
     def from_dict(payload: dict[str, Any]) -> "OperationProfile":
+        """Create profile model from dictionary payload."""
         options_payload = payload.get("filter_options") or {}
 
         from_utc = options_payload.get("from_utc")
@@ -265,6 +305,8 @@ class OperationProfile:
 
 @dataclass(slots=True)
 class TransactionEntry:
+    """Single reversible or irreversible filesystem mutation record."""
+
     action: TransactionAction
     source_path: Path
     destination_path: Path | None
@@ -274,6 +316,7 @@ class TransactionEntry:
     reversible: bool = True  # Can this action be undone?
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize transaction entry into JSON-compatible dictionary."""
         return {
             "action": self.action.value,
             "source_path": str(self.source_path),
@@ -286,6 +329,7 @@ class TransactionEntry:
 
     @staticmethod
     def from_dict(payload: dict[str, Any]) -> "TransactionEntry":
+        """Create transaction entry from persisted dictionary payload."""
         destination = payload.get("destination_path")
         return TransactionEntry(
             action=TransactionAction(payload["action"]),
@@ -300,6 +344,8 @@ class TransactionEntry:
 
 @dataclass(slots=True)
 class OperationTransaction:
+    """Transaction journal containing ordered filesystem mutation entries."""
+
     transaction_id: str
     created_at_utc: datetime
     source_root: Path
@@ -307,6 +353,7 @@ class OperationTransaction:
     entries: list[TransactionEntry] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize transaction journal into JSON-compatible dictionary."""
         return {
             "transaction_id": self.transaction_id,
             "created_at_utc": self.created_at_utc.isoformat(),
@@ -317,6 +364,7 @@ class OperationTransaction:
 
     @staticmethod
     def from_dict(payload: dict[str, Any]) -> "OperationTransaction":
+        """Create transaction journal model from persisted payload."""
         return OperationTransaction(
             transaction_id=payload["transaction_id"],
             created_at_utc=datetime.fromisoformat(payload["created_at_utc"]),
@@ -328,6 +376,8 @@ class OperationTransaction:
 
 @dataclass(slots=True)
 class OperationReportData:
+    """Report payload exported after run completion."""
+
     generated_at_utc: datetime
     source_path: Path
     target_path: Path
@@ -338,6 +388,7 @@ class OperationReportData:
     transaction_file_path: Path | None
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize report payload into JSON-compatible dictionary."""
         return {
             "generated_at_utc": self.generated_at_utc.isoformat(),
             "source_path": str(self.source_path),

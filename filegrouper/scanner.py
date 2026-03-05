@@ -1,20 +1,26 @@
+"""Filesystem scanning service producing normalized FileRecord entries."""
+
 from __future__ import annotations
 
 import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from .classifier import classify
-from .errors import OperationCancelledError
+from .constants import APP_STATE_DIRNAME, LEGACY_QUARANTINE_DIRNAME, QUARANTINE_DIRNAME, SCAN_PROGRESS_EVERY
+from .errors import OperationCancelledError, record_error
 from .models import FileRecord, OperationProgress, OperationStage, ScanFilterOptions
+from .pause_controller import PauseController
 
 LogFn = Callable[[str], None]
 ProgressFn = Callable[[OperationProgress], None]
 
 
 class FileScanner:
+    """Traverse source tree, apply filters, and collect file metadata records."""
+
     def scan(
         self,
         source_path: Path,
@@ -25,8 +31,9 @@ class FileScanner:
         errors: list[str] | None = None,
         skipped_files: list[str] | None = None,
         cancel_event: threading.Event | None = None,
-        pause_controller=None,
+        pause_controller: PauseController | None = None,
     ) -> list[FileRecord]:
+        """Scan a source folder and return sorted records matching filters."""
         source_path = source_path.expanduser().resolve()
         if not source_path.is_dir():
             raise FileNotFoundError(f"Source folder not found: {source_path}")
@@ -58,15 +65,18 @@ class FileScanner:
                     )
                 )
             except (OSError, IOError, PermissionError) as exc:  # File stat or path issues
-                if errors is not None:
-                    errors.append(f"Could not inspect file '{path}': {exc}")
+                record_error(
+                    errors,
+                    log=log,
+                    operation="Could not inspect file",
+                    path=path,
+                    error=exc,
+                )
                 if skipped_files is not None:
                     skipped_files.append(str(path))
-                if log:
-                    log(f"Could not inspect file '{path}': {exc}")
 
             scanned += 1
-            if progress and scanned % 100 == 0:
+            if progress and scanned % SCAN_PROGRESS_EVERY == 0:
                 progress(
                     OperationProgress(
                         stage=OperationStage.SCANNING,
@@ -78,7 +88,8 @@ class FileScanner:
 
         return sorted(records, key=lambda item: (item.category.value, item.last_write_utc, str(item.full_path).lower()))
 
-    def _iter_files(self, root: Path, log: LogFn | None, errors: list[str] | None = None):
+    def _iter_files(self, root: Path, log: LogFn | None, errors: list[str] | None = None) -> Iterator[str]:
+        """Yield file paths breadth-first while safely skipping bad entries."""
         pending: list[Path] = [root]
         while pending:
             current = pending.pop()
@@ -97,10 +108,13 @@ class FileScanner:
                         elif entry.is_dir(follow_symlinks=False):
                             dirs.append(path)
             except (OSError, IOError, PermissionError) as exc:  # Directory iteration issues
-                if errors is not None:
-                    errors.append(f"Could not read folder '{current}': {exc}")
-                if log:
-                    log(f"Could not read folder '{current}': {exc}")
+                record_error(
+                    errors,
+                    log=log,
+                    operation="Could not read folder",
+                    path=current,
+                    error=exc,
+                )
                 continue
 
             for file_path in files:
@@ -108,6 +122,6 @@ class FileScanner:
 
             for dir_path in dirs:
                 name = dir_path.name.lower()
-                if name in {"duplicates_quarantine", ".filegrouper", ".filegrouper_quarantine"}:
+                if name in {LEGACY_QUARANTINE_DIRNAME, APP_STATE_DIRNAME, QUARANTINE_DIRNAME}:
                     continue
                 pending.append(dir_path)

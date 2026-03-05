@@ -1,3 +1,5 @@
+"""Saved operation profile management for GUI and CLI workflows."""
+
 from __future__ import annotations
 
 import json
@@ -8,11 +10,15 @@ from .models import DedupeMode, ExecutionScope, OperationProfile, OrganizationMo
 
 
 class ProfileService:
+    """Read/write named operation profiles from JSON storage."""
+
     def __init__(self, profile_path: Path | None = None) -> None:
+        """Create profile service and ensure seed profile file exists."""
         self._profile_path = profile_path or default_profile_path()
         self._ensure_seed_profiles()
 
     def load_profiles(self) -> list[OperationProfile]:
+        """Load profiles from disk; fall back to defaults on corruption."""
         if not self._profile_path.exists():
             return self.seed_profiles()
 
@@ -26,12 +32,14 @@ class ProfileService:
             return self.seed_profiles()
 
     def save_profiles(self, profiles: list[OperationProfile]) -> None:
+        """Persist complete profile list to disk."""
         self._profile_path.parent.mkdir(parents=True, exist_ok=True)
         payload = [profile.to_dict() for profile in profiles]
         with self._profile_path.open("w", encoding="utf-8") as stream:
             json.dump(payload, stream, ensure_ascii=True, indent=2)
 
     def upsert_profile(self, profile: OperationProfile) -> None:
+        """Insert or update profile by case-insensitive profile name."""
         profiles = self.load_profiles()
         by_name = {item.name.lower(): idx for idx, item in enumerate(profiles)}
         key = profile.name.lower()
@@ -42,12 +50,14 @@ class ProfileService:
         self.save_profiles(profiles)
 
     def _ensure_seed_profiles(self) -> None:
+        """Initialize profile file with defaults on first run."""
         if self._profile_path.exists():
             return
         self.save_profiles(self.seed_profiles())
 
     @staticmethod
     def seed_profiles() -> list[OperationProfile]:
+        """Return built-in starter profiles."""
         return [
             OperationProfile(
                 name="Standard Safe",
@@ -80,6 +90,7 @@ class ProfileService:
 
 
 def default_profile_path() -> Path:
+    """Return platform-specific profile JSON path."""
     if os.name == "nt":
         root = Path(os.getenv("APPDATA", str(Path.home() / "AppData" / "Roaming")))
     elif sys_platform_is_macos():
@@ -94,4 +105,5 @@ def default_profile_path() -> Path:
 
 
 def sys_platform_is_macos() -> bool:
+    """Return True when runtime platform is macOS."""
     return os.uname().sysname.lower() == "darwin" if hasattr(os, "uname") else False

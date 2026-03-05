@@ -1,3 +1,5 @@
+"""Export operation reports to JSON, CSV and lightweight PDF formats."""
+
 from __future__ import annotations
 
 import csv
@@ -9,7 +11,10 @@ from .utils import format_size
 
 
 class ReportExporter:
+    """Serialize OperationReportData into user-shareable output formats."""
+
     def export(self, report: OperationReportData, output_directory: Path) -> tuple[Path, Path, Path]:
+        """Write JSON/CSV/PDF outputs and return resulting file paths."""
         output_directory.mkdir(parents=True, exist_ok=True)
         stamp = report.generated_at_utc.astimezone().strftime("%Y%m%d_%H%M%S")
 
@@ -25,6 +30,7 @@ class ReportExporter:
         return json_path, csv_path, pdf_path
 
     def _write_csv(self, report: OperationReportData, path: Path) -> None:
+        """Write tabular report summary and row-level details as CSV."""
         with path.open("w", encoding="utf-8", newline="") as stream:
             writer = csv.writer(stream)
             writer.writerow(["Metric", "Value"])
@@ -54,16 +60,17 @@ class ReportExporter:
             if report.summary.skipped_files:
                 writer.writerow([])
                 writer.writerow(["SkippedFilePath"])
-                for item in report.summary.skipped_files:
-                    writer.writerow([item])
+                for skipped_path in report.summary.skipped_files:
+                    writer.writerow([skipped_path])
 
             if report.summary.errors:
                 writer.writerow([])
                 writer.writerow(["Error"])
-                for item in report.summary.errors:
-                    writer.writerow([item])
+                for error_text in report.summary.errors:
+                    writer.writerow([error_text])
 
     def _build_pdf_text(self, report: OperationReportData) -> str:
+        """Build plain-text report body used by the simple PDF writer."""
         lines: list[str] = [
             "ArchiFlow Report",
             f"Generated: {report.generated_at_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC",
@@ -92,27 +99,28 @@ class ReportExporter:
         if report.similar_image_groups:
             lines.append("")
             lines.append("Similar Image Groups:")
-            for group in report.similar_image_groups[:10]:
-                lines.append(f"- {group.anchor_path} (+{len(group.similar_paths)} similar)")
+            for similar_group in report.similar_image_groups[:10]:
+                lines.append(f"- {similar_group.anchor_path} (+{len(similar_group.similar_paths)} similar)")
 
         return "\n".join(lines)
 
     def _write_simple_pdf(self, text: str, path: Path) -> None:
-        escaped = (
-            text.replace("\\", "\\\\")
-            .replace("(", "\\(")
-            .replace(")", "\\)")
-            .replace("\r", "")
-        )
+        """Write a minimal single-page PDF without external dependencies."""
+        escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)").replace("\r", "")
         content = f"BT /F1 10 Tf 40 800 Td 12 TL ({escaped.replace(chr(10), ') Tj T* (')}) Tj ET"
         content_bytes = content.encode("ascii", errors="replace")
 
         objects = [
             b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n",
             b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n",
-            b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n",
+            (
+                b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+                b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n"
+            ),
             b"4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n",
-            f"5 0 obj << /Length {len(content_bytes)} >> stream\n".encode("ascii") + content_bytes + b"\nendstream endobj\n",
+            f"5 0 obj << /Length {len(content_bytes)} >> stream\n".encode("ascii")
+            + content_bytes
+            + b"\nendstream endobj\n",
         ]
 
         buffer = bytearray(b"%PDF-1.4\n")
