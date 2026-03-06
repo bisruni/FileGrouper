@@ -75,9 +75,34 @@ ArchiFlow; manuel temizlik ve genel amacli dosya yoneticilerine gore su alanlard
 Detayli karsilastirma:
 - `assets/marketing/comparison-chart.md`
 
-## 6) Positioning Message
+## 6) Pricing / Licensing
+
+Satis gorusmeleri icin plan ve lisans notlari:
+- `assets/marketing/pricing-licensing.md`
+
+## 7) Social Media Copy
+
+Hazir kanal metinleri:
+- `assets/marketing/social-media-copy.md`
+
+## 8) Screenshot Collection (GUI Demos)
+
+Otomatik screenshot uretimi:
+
+```bash
+python scripts/capture_marketing_screenshots.py
+```
+
+Uretilen dosyalar:
+- `assets/marketing/screenshots/01-dashboard.png`
+- `assets/marketing/screenshots/02-duplicate-analysis.png`
+- `assets/marketing/screenshots/03-logs-and-undo.png`
+
+Tum pazarlama varlik listesi:
+- `assets/marketing/ASSET_INDEX.md`
+
+## 9) Positioning Message
 
 Tek cumlelik konumlandirma:
 
 `ArchiFlow, buyuk disklerde guvenli duplicate temizligi ve tutarli dosya organizasyonu sunan, undo destekli profesyonel masaustu cozumudur.`
-

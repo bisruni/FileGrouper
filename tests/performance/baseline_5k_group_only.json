@@ -1,0 +1,46 @@
+{
+  "generated_at_utc": "2026-03-06T08:56:38.867810+00:00",
+  "source": "/private/tmp/archiflow_baseline_5k",
+  "dataset": null,
+  "benchmark": {
+    "iterations": 2,
+    "elapsed_seconds": {
+      "min": 0.42803237499902025,
+      "max": 0.431531875001383,
+      "avg": 0.42978212500020163
+    },
+    "peak_memory_bytes": {
+      "min": 505532,
+      "max": 1466278,
+      "avg": 985905.0
+    },
+    "files_per_second": {
+      "min": 11586.629608725834,
+      "max": 11681.359383180874,
+      "avg": 11633.994495953353
+    },
+    "bytes_per_second": {
+      "min": 1931052532.3241286,
+      "max": 1946840399.635442,
+      "avg": 1938946465.9797854
+    },
+    "summary": {
+      "total_files_scanned": 5000,
+      "total_bytes_scanned": 833310720,
+      "duplicate_group_count": 0,
+      "duplicate_files_found": 0,
+      "duplicate_bytes_reclaimable": 0,
+      "files_copied": 0,
+      "files_moved": 0,
+      "duplicates_quarantined": 0,
+      "duplicates_deleted": 0,
+      "errors": [],
+      "skipped_files": []
+    },
+    "peak_rss_bytes": {
+      "min": 29605888,
+      "max": 30588928,
+      "avg": 30097408.0
+    }
+  }
+}

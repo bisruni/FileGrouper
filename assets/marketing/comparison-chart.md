@@ -9,6 +9,8 @@
 | Reporting (JSON/CSV) | Built-in | Manual export | Limited |
 | CLI automation | Yes | No | Limited |
 | Auditability | High (transaction logs) | Low | Low/Medium |
+| Interruption recovery | Checkpoint + recoverable journals | No | Rare |
+| Similar image option | Optional dHash mode | No | Rare/Plugin dependent |
 
 ## Recommended Message
 

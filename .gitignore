@@ -25,3 +25,5 @@ docs/api/generated/
 .coverage.*
 coverage.xml
 htmlcov/
+report_*.json
+report_*.csv

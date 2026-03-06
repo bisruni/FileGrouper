@@ -1,0 +1,46 @@
+{
+  "generated_at_utc": "2026-03-06T08:56:57.312246+00:00",
+  "source": "/private/tmp/archiflow_realworld_10k",
+  "dataset": null,
+  "benchmark": {
+    "iterations": 2,
+    "elapsed_seconds": {
+      "min": 6.781016666998767,
+      "max": 7.168159917000594,
+      "avg": 6.97458829199968
+    },
+    "peak_memory_bytes": {
+      "min": 23153737,
+      "max": 24220514,
+      "avg": 23687125.5
+    },
+    "files_per_second": {
+      "min": 1395.0581621767649,
+      "max": 1474.7051203497388,
+      "avg": 1434.8816412632518
+    },
+    "bytes_per_second": {
+      "min": 222326754.20930734,
+      "max": 235019880.6848457,
+      "avg": 228673317.4470765
+    },
+    "summary": {
+      "total_files_scanned": 10000,
+      "total_bytes_scanned": 1593673728,
+      "duplicate_group_count": 1000,
+      "duplicate_files_found": 1000,
+      "duplicate_bytes_reclaimable": 148458496,
+      "files_copied": 0,
+      "files_moved": 0,
+      "duplicates_quarantined": 0,
+      "duplicates_deleted": 0,
+      "errors": [],
+      "skipped_files": []
+    },
+    "peak_rss_bytes": {
+      "min": 80494592,
+      "max": 82608128,
+      "avg": 81551360.0
+    }
+  }
+}

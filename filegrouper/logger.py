@@ -18,8 +18,6 @@ DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_BACKUP_COUNT = 5
 
 _CONFIG_LOCK = Lock()
-_CONFIGURED = False
-_ACTIVE_LOG_FILE: Path | None = None
 
 
 class KeyValueFormatter(logging.Formatter):
@@ -68,11 +66,11 @@ def configure_logging(
     force: bool = False,
 ) -> Path:
     """Configure root ArchiFlow logger and return active log file path."""
-    global _CONFIGURED, _ACTIVE_LOG_FILE
-
     with _CONFIG_LOCK:
-        if _CONFIGURED and not force and _ACTIVE_LOG_FILE is not None:
-            return _ACTIVE_LOG_FILE
+        logger = logging.getLogger(LOGGER_NAME)
+        active_log_file = _active_log_file_from_logger(logger)
+        if not force and _is_logger_configured(logger) and active_log_file is not None:
+            return active_log_file
 
         configured_level = _parse_level(level or os.environ.get("ARCHIFLOW_LOG_LEVEL"))
         console_level = _parse_level(os.environ.get("ARCHIFLOW_CONSOLE_LOG_LEVEL", "WARNING"))
@@ -85,9 +83,8 @@ def configure_logging(
             resolved_log_dir.mkdir(parents=True, exist_ok=True)
         log_file_path = resolved_log_dir / DEFAULT_LOG_FILE_NAME
 
-        logger = logging.getLogger(LOGGER_NAME)
+        _close_and_clear_handlers(logger)
         logger.setLevel(configured_level)
-        logger.handlers.clear()
         logger.propagate = False
 
         formatter = KeyValueFormatter()
@@ -107,18 +104,17 @@ def configure_logging(
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
-        _ACTIVE_LOG_FILE = log_file_path
-        _CONFIGURED = True
         logger.info("Logging configured", extra={"transaction_id": ""})
         return log_file_path
 
 
 def get_logger(name: str | None = None) -> logging.Logger:
     """Return configured project logger or a named child logger."""
-    if not _CONFIGURED:
+    base_logger = logging.getLogger(LOGGER_NAME)
+    if not _is_logger_configured(base_logger):
         configure_logging()
     if not name:
-        return logging.getLogger(LOGGER_NAME)
+        return base_logger
     if name.startswith(LOGGER_NAME):
         return logging.getLogger(name)
     return logging.getLogger(f"{LOGGER_NAME}.{name}")
@@ -126,7 +122,47 @@ def get_logger(name: str | None = None) -> logging.Logger:
 
 def get_active_log_file() -> Path | None:
     """Return currently active rotating log file path if configured."""
-    return _ACTIVE_LOG_FILE
+    return _active_log_file_from_logger(logging.getLogger(LOGGER_NAME))
+
+
+def reset_logging_state() -> None:
+    """Reset logger handlers for test/process isolation."""
+    with _CONFIG_LOCK:
+        _close_and_clear_handlers(logging.getLogger(LOGGER_NAME))
+
+
+def _active_log_file_from_logger(logger: logging.Logger) -> Path | None:
+    for handler in logger.handlers:
+        if isinstance(handler, RotatingFileHandler):
+            base_filename = getattr(handler, "baseFilename", "")
+            if base_filename:
+                return Path(base_filename).resolve()
+    return None
+
+
+def _is_logger_configured(logger: logging.Logger) -> bool:
+    has_console = False
+    has_file = False
+    for handler in logger.handlers:
+        if isinstance(handler, RotatingFileHandler):
+            has_file = True
+        elif isinstance(handler, logging.StreamHandler):
+            has_console = True
+    return has_console and has_file
+
+
+def _close_and_clear_handlers(logger: logging.Logger) -> None:
+    handlers = list(logger.handlers)
+    for handler in handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+        try:
+            handler.close()
+        except Exception:
+            pass
+    logger.handlers.clear()
 
 
 def log_exception(logger: logging.Logger, message: str, **extra: Any) -> None:

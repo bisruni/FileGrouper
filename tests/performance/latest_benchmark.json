@@ -1,36 +1,46 @@
 {
-  "generated_at_utc": "2026-03-05T14:15:27.498364+00:00",
-  "source": "/private/tmp/archiflow_perf_smoke",
-  "dataset": {
-    "files_created": 300,
-    "bytes_written": 49308672,
-    "duplicate_files": 60,
-    "same_size_variant_files": 30
-  },
+  "generated_at_utc": "2026-03-06T08:03:02.078959+00:00",
+  "source": "/private/tmp/archiflow_speed_tuned",
+  "dataset": null,
   "benchmark": {
-    "iterations": 1,
+    "iterations": 2,
     "elapsed_seconds": {
-      "min": 0.37925512500078185,
-      "max": 0.37925512500078185,
-      "avg": 0.37925512500078185
+      "min": 9.993291957998736,
+      "max": 10.02332958399711,
+      "avg": 10.008310770997923
     },
     "peak_memory_bytes": {
-      "min": 3596086,
-      "max": 3596086,
-      "avg": 3596086.0
+      "min": 27694895,
+      "max": 29069019,
+      "avg": 28381957.0
+    },
+    "files_per_second": {
+      "min": 1197.2069659525882,
+      "max": 1200.8055053765415,
+      "avg": 1199.0062356645649
+    },
+    "bytes_per_second": {
+      "min": 193588481.32640228,
+      "max": 194170365.49671528,
+      "avg": 193879423.41155878
     },
     "summary": {
-      "total_files_scanned": 300,
-      "total_bytes_scanned": 49308672,
-      "duplicate_group_count": 30,
-      "duplicate_files_found": 30,
-      "duplicate_bytes_reclaimable": 3269632,
+      "total_files_scanned": 12000,
+      "total_bytes_scanned": 1940401152,
+      "duplicate_group_count": 3000,
+      "duplicate_files_found": 3000,
+      "duplicate_bytes_reclaimable": 478945280,
       "files_copied": 0,
       "files_moved": 0,
       "duplicates_quarantined": 0,
       "duplicates_deleted": 0,
       "errors": [],
       "skipped_files": []
+    },
+    "peak_rss_bytes": {
+      "min": 97959936,
+      "max": 103350272,
+      "avg": 100655104.0
     }
   }
 }

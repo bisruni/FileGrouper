@@ -14,7 +14,7 @@ def sample_source_tree(tmp_path: Path) -> Path:
     (source / "images").mkdir(parents=True)
     (source / "docs" / "a.txt").write_text("alpha", encoding="utf-8")
     (source / "docs" / "b.txt").write_text("beta", encoding="utf-8")
-    (source / "images" / "img.jpg").write_bytes(b"\xFF\xD8\xFF\xD9")
+    (source / "images" / "img.jpg").write_bytes(b"\xff\xd8\xff\xd9")
     return source
 
 

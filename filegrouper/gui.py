@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -42,6 +43,7 @@ try:
 except ImportError:
     qdarktheme = None
 
+from .config_service import AppConfig, AppConfigService
 from .constants import quarantine_dir
 from .gui_components import DuplicateGroupDialog, FiltersDialog, UiFilterDraft, Worker
 from .gui_texts import DEDUPE_ITEMS, MODE_ITEMS, TR, WORKFLOW_ITEMS
@@ -51,6 +53,7 @@ from .models import (
     DedupeMode,
     DuplicateGroup,
     ExecutionScope,
+    OperationProfile,
     OperationProgress,
     OperationSummary,
     OrganizationMode,
@@ -58,6 +61,7 @@ from .models import (
 )
 from .pause_controller import PauseController
 from .pipeline import FileGrouperEngine, RunOptions, RunResult
+from .profile_service import ProfileService
 from .utils import format_size
 
 
@@ -68,6 +72,10 @@ class MainWindow(QMainWindow):
         """Initialize main window state, widgets and signal wiring."""
         super().__init__()
         self.app_logger = get_logger("gui")
+        self.config_service = AppConfigService()
+        self.app_config: AppConfig = self.config_service.load_resolved_config()
+        self.profile_service = ProfileService()
+        self.profiles: list[OperationProfile] = self.profile_service.load_profiles()
         self.engine = FileGrouperEngine()
         self.similar_supported = self.engine.detector.is_similar_supported()
 
@@ -89,8 +97,12 @@ class MainWindow(QMainWindow):
         self.last_run_apply_changes: bool = False
         self.preview_quarantine_estimate = 0
         self.preview_organize_estimate = 0
+        self._last_progress_ui_update = 0.0
+        self._progress_ui_min_interval_seconds = 0.05
 
         self._build_ui()
+        self._load_profiles_into_ui()
+        self._apply_startup_defaults()
         self._set_running(False)
         self._set_status(TR["ready"])
 
@@ -101,21 +113,31 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         root = QVBoxLayout()
-        root.setContentsMargins(18, 16, 18, 16)
-        root.setSpacing(12)
+        root.setContentsMargins(20, 18, 20, 18)
+        root.setSpacing(14)
         central.setLayout(root)
 
         # Top bar
         title_row = QHBoxLayout()
+        title_row.setSpacing(10)
         title_col = QVBoxLayout()
         self.title_lbl = QLabel(TR["title"])
-        self.title_lbl.setStyleSheet("font-weight:700; font-size:18px;")
+        self.title_lbl.setStyleSheet("font-weight:700; font-size:22px; letter-spacing:0.2px;")
         self.sub_lbl = QLabel(TR["subtitle"])
-        self.sub_lbl.setStyleSheet("color: rgba(127,127,127,1);")
+        self.sub_lbl.setStyleSheet("color: rgba(100,100,110,1);")
         title_col.addWidget(self.title_lbl)
         title_col.addWidget(self.sub_lbl)
         title_row.addLayout(title_col)
         title_row.addItem(QSpacerItem(10, 10, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
+
+        self.profile_lbl = QLabel(TR["profile"])
+        self.profile_combo = QComboBox()
+        self.profile_combo.setMinimumWidth(180)
+        self.profile_apply_btn = QPushButton(TR["profile_apply"])
+        self.profile_apply_btn.clicked.connect(self._apply_selected_profile)
+        title_row.addWidget(self.profile_lbl)
+        title_row.addWidget(self.profile_combo)
+        title_row.addWidget(self.profile_apply_btn)
 
         self.dry_check = QCheckBox(TR["dry_run"])
         self.dry_check.setChecked(True)
@@ -148,6 +170,9 @@ class MainWindow(QMainWindow):
             self.workflow_tabs.addTab(page, title)
         self.workflow_tabs.currentChanged.connect(self._on_workflow_changed)
         workflow_layout.addWidget(self.workflow_tabs)
+        self.workflow_hint_lbl = QLabel(TR["workflow_hint"])
+        self.workflow_hint_lbl.setStyleSheet("color: #6b7280; font-size: 11px;")
+        workflow_layout.addWidget(self.workflow_hint_lbl)
         root.addWidget(workflow_card)
 
         # Card: inputs + options
@@ -160,9 +185,15 @@ class MainWindow(QMainWindow):
 
         self.source_edit = QLineEdit()
         self.target_edit = QLineEdit()
+        self.source_edit.setPlaceholderText("/Volumes/USB")
+        self.target_edit.setPlaceholderText("/Volumes/USB_Organized")
+        self.source_edit.setMinimumHeight(36)
+        self.target_edit.setMinimumHeight(36)
 
         src_btn = QPushButton(TR["browse"])
         tgt_btn = QPushButton(TR["browse"])
+        src_btn.setMinimumHeight(36)
+        tgt_btn.setMinimumHeight(36)
         src_btn.clicked.connect(self._browse_source)
         tgt_btn.clicked.connect(self._browse_target)
 
@@ -182,9 +213,11 @@ class MainWindow(QMainWindow):
         self.mode_combo = QComboBox()
         for label, _ in MODE_ITEMS:
             self.mode_combo.addItem(label)
+        self.mode_combo.setMinimumHeight(36)
         self.dedupe_combo = QComboBox()
         for label, _ in DEDUPE_ITEMS:
             self.dedupe_combo.addItem(label)
+        self.dedupe_combo.setMinimumHeight(36)
 
         opt_grid = QGridLayout()
         self.mode_lbl = QLabel(TR["mode"])
@@ -197,6 +230,7 @@ class MainWindow(QMainWindow):
         opt_box.addLayout(opt_grid)
 
         self.filters_btn = QPushButton(TR["filters"])
+        self.filters_btn.setMinimumHeight(36)
         self.filters_btn.clicked.connect(self._open_filters)
         opt_box.addWidget(self.filters_btn)
 
@@ -215,9 +249,16 @@ class MainWindow(QMainWindow):
         self.apply_btn.clicked.connect(lambda: self._start_run(True))
         self.pause_btn.clicked.connect(self._toggle_pause)
         self.cancel_btn.clicked.connect(self._cancel_run)
+        self.preview_btn.setObjectName("primaryBtn")
+        self.apply_btn.setObjectName("primaryBtn")
+        self.cancel_btn.setObjectName("dangerBtn")
 
         self.preview_btn.setMinimumWidth(140)
         self.apply_btn.setMinimumWidth(140)
+        self.preview_btn.setMinimumHeight(38)
+        self.apply_btn.setMinimumHeight(38)
+        self.pause_btn.setMinimumHeight(38)
+        self.cancel_btn.setMinimumHeight(38)
 
         actions.addWidget(self.preview_btn)
         actions.addWidget(self.apply_btn)
@@ -366,6 +407,13 @@ class MainWindow(QMainWindow):
         m.addAction(act_quit)
 
         self._on_workflow_changed(self.workflow_tabs.currentIndex())
+        self.setStyleSheet(self.styleSheet() + """
+QPushButton#primaryBtn { background: #2563eb; color: #ffffff; border: 1px solid #1d4ed8; font-weight: 600; }
+QPushButton#primaryBtn:hover { background: #1d4ed8; }
+QPushButton#primaryBtn:pressed { background: #1e40af; }
+QPushButton#dangerBtn { background: #fff5f5; color: #b91c1c; border: 1px solid #fecaca; }
+QPushButton#dangerBtn:hover { background: #fee2e2; }
+""")
 
     # ---- actions ----
 
@@ -423,6 +471,11 @@ class MainWindow(QMainWindow):
             return
         if self.cancel_event is not None:
             self.cancel_event.set()
+        # If user cancels while paused, unblock worker immediately.
+        self.pause_controller.resume()
+        self.paused = False
+        self.pause_btn.setText(TR["pause"])
+        self._set_status(TR["cancelled"])
 
     def _open_selected_duplicate_group_dialog(self) -> None:
         row = self.dupes_table.currentRow()
@@ -457,6 +510,76 @@ class MainWindow(QMainWindow):
         else:
             self.similar_check.setChecked(False)
             self.similar_check.setEnabled(False)
+
+    def _load_profiles_into_ui(self) -> None:
+        """Populate profile combo from persisted profile storage."""
+        self.profiles = self.profile_service.load_profiles()
+        self.profile_combo.clear()
+        for profile in self.profiles:
+            self.profile_combo.addItem(profile.name)
+        has_profiles = bool(self.profiles)
+        self.profile_combo.setEnabled(has_profiles)
+        self.profile_apply_btn.setEnabled(has_profiles)
+
+    def _apply_startup_defaults(self) -> None:
+        """Apply resolved config defaults and optional default profile."""
+        self._set_scope_combo(self.app_config.default_scope)
+        self._set_mode_combo(self.app_config.default_mode)
+        self._set_dedupe_combo(self.app_config.default_dedupe)
+        self.dry_check.setChecked(self.app_config.default_dry_run)
+        self.similar_check.setChecked(self.similar_supported and self.app_config.default_similar_images)
+        if self.app_config.default_profile:
+            index = self.profile_combo.findText(self.app_config.default_profile, Qt.MatchFlag.MatchFixedString)
+            if index >= 0:
+                self.profile_combo.setCurrentIndex(index)
+                self._apply_selected_profile()
+
+    def _set_scope_combo(self, scope: ExecutionScope) -> None:
+        for index, (_title, item_scope, _desc) in enumerate(WORKFLOW_ITEMS):
+            if item_scope is scope:
+                self.workflow_tabs.setCurrentIndex(index)
+                return
+
+    def _set_mode_combo(self, mode: OrganizationMode) -> None:
+        for label, item_mode in MODE_ITEMS:
+            if item_mode is mode:
+                self.mode_combo.setCurrentText(label)
+                return
+
+    def _set_dedupe_combo(self, dedupe_mode: DedupeMode) -> None:
+        for label, item_mode in DEDUPE_ITEMS:
+            if item_mode is dedupe_mode:
+                self.dedupe_combo.setCurrentText(label)
+                return
+
+    @Slot()
+    def _apply_selected_profile(self) -> None:
+        """Apply selected profile values to current GUI controls."""
+        if not self.profiles:
+            return
+        index = self.profile_combo.currentIndex()
+        if index < 0 or index >= len(self.profiles):
+            return
+        profile = self.profiles[index]
+        self._set_scope_combo(profile.execution_scope)
+        self._set_mode_combo(profile.organization_mode)
+        self._set_dedupe_combo(profile.dedupe_mode)
+        self.dry_check.setChecked(profile.is_dry_run)
+        self.similar_check.setChecked(self.similar_supported and profile.detect_similar_images)
+        self.filters_draft = self._draft_from_filter_options(profile.filter_options)
+        self._log(f"{TR['profile_loaded']}: {profile.name}")
+
+    @staticmethod
+    def _draft_from_filter_options(options: ScanFilterOptions) -> UiFilterDraft:
+        """Convert scan filter options into editable draft strings."""
+        return UiFilterDraft(
+            include_ext=",".join(options.include_extensions),
+            exclude_ext=",".join(options.exclude_extensions),
+            min_mb=(f"{options.min_size_bytes / (1024 * 1024):.2f}" if options.min_size_bytes else ""),
+            max_mb=(f"{options.max_size_bytes / (1024 * 1024):.2f}" if options.max_size_bytes else ""),
+            from_date=(options.from_utc.date().isoformat() if options.from_utc else ""),
+            to_date=(options.to_utc.date().isoformat() if options.to_utc else ""),
+        )
 
     def _undo_last(self) -> None:
         target_text = self.target_edit.text().strip()
@@ -503,7 +626,7 @@ class MainWindow(QMainWindow):
 
         error = self.engine.validate_paths(source, target, scope)
         if error and apply_changes:
-            QMessageBox.critical(self, TR["err"], error)
+            QMessageBox.critical(self, TR["err"], self._friendly_error_message(error))
             return
 
         if apply_changes and not self._confirm_apply(scope):
@@ -531,8 +654,10 @@ class MainWindow(QMainWindow):
             self.preview_organize_estimate = 0
         self.progress.setValue(0)
         self.progress_lbl.setText("0%")
+        self.progress.setRange(0, 100)
         self._set_status(TR["running"])
         self._set_preview_summary(None)
+        self._last_progress_ui_update = 0.0
 
         # thread init
         self.cancel_event = threading.Event()
@@ -555,6 +680,10 @@ class MainWindow(QMainWindow):
         self.last_run_scope = scope
         self.last_run_dedupe_mode = self._dedupe_enum()
         self.last_run_apply_changes = apply_changes
+        self._log(
+            f"Calisma basladi | akis={scope.value} | mode={self.mode_combo.currentText()} | "
+            f"dedupe={self.dedupe_combo.currentText()} | dry_run={self.dry_check.isChecked()}"
+        )
 
         self.worker_thread = QThread()
         self.worker = Worker(self.engine, options, self.cancel_event, self.pause_controller)
@@ -578,23 +707,47 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _thread_finished(self) -> None:
+        thread = self.worker_thread
+        worker = self.worker
         self._set_running(False)
+        self.cancel_event = None
         self.worker_thread = None
         self.worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if thread is not None:
+            thread.deleteLater()
 
     # ---- signals from worker ----
 
     @Slot(object)
     def _on_progress(self, p: OperationProgress) -> None:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            return
+        now = time.monotonic()
+        if (now - self._last_progress_ui_update) < self._progress_ui_min_interval_seconds:
+            return
+        self._last_progress_ui_update = now
+
         if p.total_files > 0:
+            if self.progress.maximum() == 0:
+                self.progress.setRange(0, 100)
             percent = min(100, int((p.processed_files / p.total_files) * 100))
             self.progress.setValue(percent)
             self.progress_lbl.setText(f"{percent}%")
-        if p.message:
+        else:
+            # Unknown total (e.g., scanning): show indeterminate bar to avoid freeze perception.
+            if self.progress.maximum() != 0:
+                self.progress.setRange(0, 0)
+            self.progress_lbl.setText(str(p.processed_files))
+        if p.message and not self.paused:
             self._set_status(p.message)
 
     @Slot(object)
     def _on_complete(self, result: RunResult) -> None:
+        self.progress.setRange(0, 100)
+        self.progress.setValue(100)
+        self.progress_lbl.setText("100%")
         self.last_result = result
         s = result.summary
         self.preview_duplicate_groups = result.duplicate_groups
@@ -632,23 +785,36 @@ class MainWindow(QMainWindow):
         if not self.last_run_apply_changes:
             self._show_summary_dialog(
                 title=TR["preview_summary"],
+                intro_text=TR["summary_preview_done"],
                 summary=s,
                 quarantine_count=self.preview_quarantine_estimate,
                 organize_count=self.preview_organize_estimate,
                 include_quarantine=True,
             )
+        else:
+            self._show_summary_dialog(
+                title=TR["summary_dialog_title"],
+                intro_text=TR["summary_apply_done"],
+                summary=s,
+                quarantine_count=s.duplicates_quarantined,
+                organize_count=s.files_copied + s.files_moved,
+                include_quarantine=True,
+            )
 
     @Slot()
     def _on_cancelled(self) -> None:
+        self.progress.setRange(0, 100)
         self._set_status(TR["cancelled"])
-        self._log("İşlem iptal edildi.")
+        self._log("Islem iptal edildi. Tamamlanmayan adimlar uygulanmadi.")
 
     @Slot(str)
     def _on_failed(self, msg: str) -> None:
+        self.progress.setRange(0, 100)
         self._set_status(TR["err"])
         self._log("ERROR: " + msg)
         self.app_logger.error(msg, extra={"transaction_id": ""})
-        QMessageBox.critical(self, TR["err"], "Bir hata oluştu.\nDetay log sekmesinde.")
+        friendly = self._friendly_error_message(msg)
+        QMessageBox.critical(self, TR["err"], f"{friendly}\n{TR['error_details_hint']}")
 
     # ---- helpers ----
 
@@ -704,6 +870,8 @@ class MainWindow(QMainWindow):
         self.preview_btn.setEnabled(not running)
         self.apply_btn.setEnabled(not running)
         self.filters_btn.setEnabled(not running)
+        self.profile_combo.setEnabled(not running and bool(self.profiles))
+        self.profile_apply_btn.setEnabled(not running and bool(self.profiles))
         self.pause_btn.setEnabled(running)
         self.cancel_btn.setEnabled(running)
         self.workflow_tabs.setEnabled(not running)
@@ -723,6 +891,22 @@ class MainWindow(QMainWindow):
 
     def _set_status(self, text: str) -> None:
         self.status_lbl.setText(text)
+
+    @staticmethod
+    def _friendly_error_message(message: str) -> str:
+        lowered = message.lower()
+        if "source folder not found" in lowered or "kaynak klasör bulunamadı" in lowered:
+            return "Kaynak klasor bulunamadi. Disk baglantisini ve klasor yolunu kontrol edin."
+        if "source and target cannot be the same" in lowered or "kaynak ve hedef klasör aynı olamaz" in lowered:
+            return "Kaynak ve hedef klasor ayni olamaz. Farkli bir hedef secin."
+        if (
+            "target folder cannot be inside source" in lowered
+            or "hedef klasör kaynak klasörün içinde olamaz" in lowered
+        ):
+            return "Hedef klasor, kaynak klasorun icinde olamaz. Disarida bir hedef secin."
+        if "permission" in lowered or "izin" in lowered:
+            return "Klasore erisim izni yetersiz. Farkli klasor secin veya izinleri kontrol edin."
+        return message
 
     def _log(self, msg: str) -> None:
         self.log_text.append(msg)
@@ -871,6 +1055,7 @@ class MainWindow(QMainWindow):
         self,
         *,
         title: str,
+        intro_text: str,
         summary: OperationSummary,
         quarantine_count: int | None,
         organize_count: int | None,
@@ -884,7 +1069,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             title or TR["summary_dialog_title"],
-            f"{TR['summary_preview_done']}\n\n{text}",
+            f"{intro_text}\n\n{text}",
         )
 
     def _confirm_apply(self, scope: ExecutionScope) -> bool:
@@ -935,9 +1120,7 @@ class MainWindow(QMainWindow):
             return
 
         self._set_status("Kapatiliyor...")
-        if self.cancel_event is not None:
-            self.cancel_event.set()
-        self.pause_controller.resume()
+        self._cancel_run()
 
         if self.worker_thread is not None:
             self.worker_thread.wait(3000)
@@ -960,7 +1143,11 @@ def launch_gui() -> None:
         >>> # launch_gui()
         >>> # Starts the desktop app event loop.
     """
-    log_path = configure_logging()
+    config_service = AppConfigService()
+    app_config = config_service.load_resolved_config()
+    if app_config.console_log_level and not os.environ.get("ARCHIFLOW_CONSOLE_LOG_LEVEL"):
+        os.environ["ARCHIFLOW_CONSOLE_LOG_LEVEL"] = app_config.console_log_level
+    log_path = configure_logging(log_dir=app_config.log_dir, level=app_config.log_level or None)
     app_logger = get_logger("gui")
     app = QApplication(sys.argv)
     app_logger.info(f"GUI started. log_file={log_path}", extra={"transaction_id": ""})

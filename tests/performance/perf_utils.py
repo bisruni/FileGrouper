@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import sys
 import threading
 import tracemalloc
 from dataclasses import dataclass
@@ -13,6 +14,11 @@ from typing import Any, Mapping
 from filegrouper.models import DedupeMode, ExecutionScope, OrganizationMode, ScanFilterOptions
 from filegrouper.pause_controller import PauseController
 from filegrouper.pipeline import FileGrouperEngine, RunOptions
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - platform dependent
+    resource = None
 
 
 @dataclass(slots=True)
@@ -129,6 +135,7 @@ def run_preview_benchmark(
     *,
     source: Path,
     iterations: int = 1,
+    execution_scope: ExecutionScope = ExecutionScope.GROUP_AND_DEDUPE,
 ) -> dict[str, Any]:
     """Run preview benchmark and return timing/memory/statistics payload."""
     if iterations <= 0:
@@ -136,6 +143,9 @@ def run_preview_benchmark(
 
     timings: list[float] = []
     peak_memories: list[int] = []
+    peak_rss_memories: list[int] = []
+    files_per_second: list[float] = []
+    bytes_per_second: list[float] = []
     summary_payload: dict[str, Any] | None = None
 
     for _ in range(iterations):
@@ -145,7 +155,7 @@ def run_preview_benchmark(
             target_path=None,
             organization_mode=OrganizationMode.COPY,
             dedupe_mode=DedupeMode.QUARANTINE,
-            execution_scope=ExecutionScope.GROUP_AND_DEDUPE,
+            execution_scope=execution_scope,
             dry_run=True,
             detect_similar_images=False,
             apply_changes=False,
@@ -169,10 +179,18 @@ def run_preview_benchmark(
 
         timings.append(elapsed)
         peak_memories.append(peak)
+        if elapsed > 0:
+            files_per_second.append(result.summary.total_files_scanned / elapsed)
+            bytes_per_second.append(result.summary.total_bytes_scanned / elapsed)
+        if resource is not None:
+            ru = resource.getrusage(resource.RUSAGE_SELF)
+            # Linux: KB, macOS: bytes
+            peak_rss_bytes = int(ru.ru_maxrss if sys.platform == "darwin" else ru.ru_maxrss * 1024)
+            peak_rss_memories.append(peak_rss_bytes)
         summary_payload = result.summary.to_dict()
 
     assert summary_payload is not None
-    return {
+    payload: dict[str, Any] = {
         "iterations": iterations,
         "elapsed_seconds": {
             "min": min(timings),
@@ -184,8 +202,25 @@ def run_preview_benchmark(
             "max": max(peak_memories),
             "avg": sum(peak_memories) / len(peak_memories),
         },
+        "files_per_second": {
+            "min": min(files_per_second),
+            "max": max(files_per_second),
+            "avg": sum(files_per_second) / len(files_per_second),
+        },
+        "bytes_per_second": {
+            "min": min(bytes_per_second),
+            "max": max(bytes_per_second),
+            "avg": sum(bytes_per_second) / len(bytes_per_second),
+        },
         "summary": summary_payload,
     }
+    if peak_rss_memories:
+        payload["peak_rss_bytes"] = {
+            "min": min(peak_rss_memories),
+            "max": max(peak_rss_memories),
+            "avg": sum(peak_rss_memories) / len(peak_rss_memories),
+        }
+    return payload
 
 
 def compare_with_baseline(

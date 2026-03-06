@@ -3,7 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from filegrouper.models import OperationTransaction, TransactionAction, TransactionEntry, TransactionStatus
+from filegrouper.models import (
+    OperationTransaction,
+    TransactionAction,
+    TransactionEntry,
+    TransactionLifecycleStatus,
+    TransactionStatus,
+)
 from filegrouper.transaction_service import TransactionService
 
 
@@ -92,3 +98,102 @@ def test_transaction_service_undo_reverses_done_entries_and_skips_others(tmp_pat
     assert not copied_dest.exists()
     assert quarantine_source.exists()
     assert not quarantine_dest.exists()
+
+
+def test_transaction_service_recover_interrupted_transactions_rolls_back_and_marks_status(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_root.mkdir()
+    target_root.mkdir()
+
+    source_path = source_root / "dup.txt"
+    destination_path = target_root / ".filegrouper_quarantine" / "dup.txt"
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    destination_path.write_text("dup", encoding="utf-8")
+
+    transaction = OperationTransaction(
+        transaction_id="tx-interrupted",
+        created_at_utc=datetime.now(tz=timezone.utc),
+        source_root=source_root,
+        target_root=target_root,
+        lifecycle_status=TransactionLifecycleStatus.RUNNING,
+        checkpoint_stage="dedupe",
+        checkpoint_processed_files=1,
+        checkpoint_total_files=3,
+        checkpoint_message="Interrupted during duplicate processing.",
+        entries=[
+            TransactionEntry(
+                action=TransactionAction.QUARANTINED_DUPLICATE,
+                source_path=source_path,
+                destination_path=destination_path,
+                timestamp_utc=datetime.now(tz=timezone.utc),
+                status=TransactionStatus.DONE,
+            ),
+            TransactionEntry(
+                action=TransactionAction.QUARANTINED_DUPLICATE,
+                source_path=source_root / "pending.txt",
+                destination_path=target_root / ".filegrouper_quarantine" / "pending.txt",
+                timestamp_utc=datetime.now(tz=timezone.utc),
+                status=TransactionStatus.PENDING,
+                error_message="cancelled",
+            ),
+        ],
+    )
+
+    service = TransactionService()
+    tx_file = service.save_transaction(transaction)
+    assert service.find_recoverable_transactions(target_root) == [tx_file]
+
+    summary = service.recover_interrupted_transactions(target_root)
+
+    assert summary.duplicates_quarantined == 1
+    assert source_path.exists()
+    assert not destination_path.exists()
+
+    updated_tx = service.load(tx_file)
+    assert updated_tx.lifecycle_status is TransactionLifecycleStatus.ROLLED_BACK
+    assert updated_tx.checkpoint_stage == "undo_completed"
+    assert service.find_recoverable_transactions(target_root) == []
+
+
+def test_transaction_service_verify_rollback_reports_unresolved_state(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_root.mkdir()
+    target_root.mkdir()
+
+    moved_source = source_root / "missing-after-rollback.txt"
+    moved_dest = target_root / "archive" / "missing-after-rollback.txt"
+    copied_dest = target_root / "copies" / "still-there.txt"
+    copied_dest.parent.mkdir(parents=True, exist_ok=True)
+    copied_dest.write_text("copy", encoding="utf-8")
+
+    transaction = OperationTransaction(
+        transaction_id="tx-verify",
+        created_at_utc=datetime.now(tz=timezone.utc),
+        source_root=source_root,
+        target_root=target_root,
+        entries=[
+            TransactionEntry(
+                action=TransactionAction.MOVED,
+                source_path=moved_source,
+                destination_path=moved_dest,
+                timestamp_utc=datetime.now(tz=timezone.utc),
+                status=TransactionStatus.DONE,
+            ),
+            TransactionEntry(
+                action=TransactionAction.COPIED,
+                source_path=source_root / "copy-source.txt",
+                destination_path=copied_dest,
+                timestamp_utc=datetime.now(tz=timezone.utc),
+                status=TransactionStatus.DONE,
+            ),
+        ],
+    )
+
+    service = TransactionService()
+    tx_file = service.save_transaction(transaction)
+    issues = service.verify_rollback(tx_file)
+
+    assert any("source missing after rollback" in issue for issue in issues)
+    assert any("copied destination still exists" in issue for issue in issues)

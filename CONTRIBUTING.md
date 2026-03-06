@@ -32,3 +32,20 @@ pytest
 2. Commit mesajlarini acik yazin.
 3. Davranis degisikligi varsa README veya docs guncelleyin.
 4. Veri kaybi riski olusturan degisikliklerde ek test ekleyin.
+
+## Katki Sozlesmesi (DCO)
+
+Bu proje Contributor Certificate of Origin (DCO) modelini kullanir.
+Pull request'e giren her commit `Signed-off-by` satiri icermelidir:
+
+```text
+Signed-off-by: Ad Soyad <mail@example.com>
+```
+
+Ornek commit:
+
+```bash
+git commit -s -m "feat: duplicate summary dialog improvements"
+```
+
+`-s` parametresi sign-off satirini otomatik ekler.

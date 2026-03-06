@@ -6,12 +6,16 @@ from pathlib import Path
 
 from .models import FileCategory
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".heic", ".heif", ".tiff", ".svg", ".raw"}
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm", ".m4v", ".3gp"}
-AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".wma"}
-TEXT_EXTENSIONS = {".txt", ".md", ".rtf", ".doc", ".docx", ".pdf", ".csv", ".json", ".xml", ".log"}
-APPLICATION_EXTENSIONS = {".exe", ".msi", ".dmg", ".pkg", ".app", ".apk", ".bat", ".cmd", ".ps1", ".sh", ".jar", ".iso"}
-ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"}
+IMAGE_EXTENSIONS = frozenset(
+    {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".heic", ".heif", ".tiff", ".svg", ".raw"}
+)
+VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm", ".m4v", ".3gp"})
+AUDIO_EXTENSIONS = frozenset({".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".wma"})
+TEXT_EXTENSIONS = frozenset({".txt", ".md", ".rtf", ".doc", ".docx", ".pdf", ".csv", ".json", ".xml", ".log"})
+APPLICATION_EXTENSIONS = frozenset(
+    {".exe", ".msi", ".dmg", ".pkg", ".app", ".apk", ".bat", ".cmd", ".ps1", ".sh", ".jar", ".iso"}
+)
+ARCHIVE_EXTENSIONS = frozenset({".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"})
 
 
 def classify(path: Path) -> FileCategory:

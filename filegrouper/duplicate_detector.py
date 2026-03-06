@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Protocol, cast
 
-from .constants import FULL_HASH_PROGRESS_EVERY, QUICK_HASH_PROGRESS_EVERY, SIMILAR_PROGRESS_EVERY
+from .constants import (
+    FULL_HASH_PROGRESS_EVERY,
+    HASH_PARALLEL_MAX_WORKERS,
+    HASH_PARALLEL_MIN_FILES,
+    QUICK_HASH_PROGRESS_EVERY,
+    SIMILAR_BUCKET_SIZE_LIMIT,
+    SIMILAR_PROGRESS_EVERY,
+    SIMILAR_SECONDARY_BITS,
+)
 from .errors import OperationCancelledError, log_error
 from .hash_cache import HashCacheService
 from .models import DuplicateGroup, FileRecord, OperationProgress, OperationStage, SimilarImageGroup
@@ -39,7 +49,7 @@ class PauseControllerLike(Protocol):
         """Block while paused, respecting cancellation."""
 
 
-SUPPORTED_SIMILAR_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".heic"}
+SUPPORTED_SIMILAR_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".heic"})
 
 # Quick signature reads a few slices of the file (fast). Used as stage-1 filter before full SHA.
 QUICK_EDGE_BYTES = 1024 * 1024  # first/last 1MB
@@ -91,113 +101,224 @@ class DuplicateDetector:
         # 2) stage-1 quick signature (fast IO) to reduce candidates
         quick_total = sum(len(group) for group in size_candidates)
         quick_processed = 0
+        quick_workers = _recommended_hash_workers(quick_total)
+        quick_executor: ThreadPoolExecutor | None = None
+        if quick_workers > 1 and quick_total >= HASH_PARALLEL_MIN_FILES:
+            quick_executor = ThreadPoolExecutor(max_workers=quick_workers)
+            if log is not None:
+                log(f"Quick signature workers: {quick_workers}")
 
         hash_input_groups: list[list[FileRecord]] = []
-        for size_group in size_candidates:
-            by_quick: dict[str, list[FileRecord]] = defaultdict(list)
-            for file in size_group:
-                _guard_cancel(cancel_event, pause_controller)
+        try:
+            for size_group in size_candidates:
+                by_quick: dict[str, list[FileRecord]] = defaultdict(list)
+                if quick_executor is not None and len(size_group) >= HASH_PARALLEL_MIN_FILES:
+                    for file in size_group:
+                        _guard_cancel(cancel_event, pause_controller)
+                    futures_to_file = {
+                        quick_executor.submit(
+                            _compute_quick_signature_for_file,
+                            file,
+                            cache,
+                            cancel_event,
+                            pause_controller,
+                        ): file
+                        for file in size_group
+                    }
 
-                try:
-                    if cache is not None:
-                        compute_signature = cast(Callable[[], str], partial(compute_quick_signature, file.full_path))
-                        quick_signature = cache.get_or_compute_quick_signature(
-                            file.full_path,
-                            file.size_bytes,
-                            file.last_write_utc,
-                            compute_signature,
-                        )
-                    else:
-                        quick_signature = compute_quick_signature(file.full_path)
-                except (OSError, IOError, ValueError) as exc:  # File I/O or hash computation
-                    log_error(
-                        log,
-                        operation="Could not compute quick signature",
-                        path=file.full_path,
-                        error=exc,
-                    )
-                    continue
+                    for future in as_completed(futures_to_file):
+                        file = futures_to_file[future]
+                        try:
+                            quick_signature = future.result()
+                        except OperationCancelledError:
+                            if quick_executor is not None:
+                                quick_executor.shutdown(wait=False, cancel_futures=True)
+                                quick_executor = None
+                            raise
+                        except (OSError, IOError, ValueError) as exc:  # File I/O or hash computation
+                            log_error(
+                                log,
+                                operation="Could not compute quick signature",
+                                path=file.full_path,
+                                error=exc,
+                            )
+                            continue
 
-                by_quick[quick_signature].append(file)
-                quick_processed += 1
-                if progress and (quick_processed % QUICK_HASH_PROGRESS_EVERY == 0 or quick_processed == quick_total):
-                    progress(
-                        OperationProgress(
-                            stage=OperationStage.HASHING,
-                            processed_files=quick_processed,
-                            total_files=max(quick_total, 1),
-                            message="Quick duplicate filtering",
-                        )
-                    )
+                        by_quick[quick_signature].append(file)
+                        quick_processed += 1
+                        if progress and (
+                            quick_processed % QUICK_HASH_PROGRESS_EVERY == 0 or quick_processed == quick_total
+                        ):
+                            progress(
+                                OperationProgress(
+                                    stage=OperationStage.HASHING,
+                                    processed_files=quick_processed,
+                                    total_files=max(quick_total, 1),
+                                    message="Quick duplicate filtering",
+                                )
+                            )
+                else:
+                    for file in size_group:
+                        _guard_cancel(cancel_event, pause_controller)
 
-            for quick_group in by_quick.values():
-                if len(quick_group) > 1:
-                    hash_input_groups.append(quick_group)
+                        try:
+                            quick_signature = _compute_quick_signature_for_file(
+                                file,
+                                cache,
+                                cancel_event,
+                                pause_controller,
+                            )
+                        except (OSError, IOError, ValueError) as exc:  # File I/O or hash computation
+                            log_error(
+                                log,
+                                operation="Could not compute quick signature",
+                                path=file.full_path,
+                                error=exc,
+                            )
+                            continue
+
+                        by_quick[quick_signature].append(file)
+                        quick_processed += 1
+                        if progress and (
+                            quick_processed % QUICK_HASH_PROGRESS_EVERY == 0 or quick_processed == quick_total
+                        ):
+                            progress(
+                                OperationProgress(
+                                    stage=OperationStage.HASHING,
+                                    processed_files=quick_processed,
+                                    total_files=max(quick_total, 1),
+                                    message="Quick duplicate filtering",
+                                )
+                            )
+
+                for quick_group in by_quick.values():
+                    if len(quick_group) > 1:
+                        hash_input_groups.append(quick_group)
+        finally:
+            if quick_executor is not None:
+                quick_executor.shutdown(wait=True, cancel_futures=False)
 
         # 3) stage-2 full SHA only on filtered candidates
         groups: list[DuplicateGroup] = []
         full_total = sum(len(group) for group in hash_input_groups)
         full_processed = 0
+        hash_workers = _recommended_hash_workers(full_total)
+        executor: ThreadPoolExecutor | None = None
+        if hash_workers > 1 and full_total >= HASH_PARALLEL_MIN_FILES:
+            executor = ThreadPoolExecutor(max_workers=hash_workers)
+            if log is not None:
+                log(f"Duplicate hashing workers: {hash_workers}")
 
-        for candidate_group in hash_input_groups:
-            by_hash: dict[str, list[FileRecord]] = defaultdict(list)
-            for file in candidate_group:
-                _guard_cancel(cancel_event, pause_controller)
+        try:
+            for candidate_group in hash_input_groups:
+                by_hash: dict[str, list[FileRecord]] = defaultdict(list)
+                if executor is not None and len(candidate_group) >= HASH_PARALLEL_MIN_FILES:
+                    for file in candidate_group:
+                        _guard_cancel(cancel_event, pause_controller)
+                    futures_to_file = {
+                        executor.submit(
+                            _compute_sha256_for_file,
+                            file,
+                            cache,
+                            cancel_event,
+                            pause_controller,
+                        ): file
+                        for file in candidate_group
+                    }
 
-                try:
-                    if cache is not None:
-                        compute_hash = cast(Callable[[], str], partial(compute_sha256, file.full_path))
-                        sha256_hash = cache.get_or_compute_sha256(
-                            file.full_path,
-                            file.size_bytes,
-                            file.last_write_utc,
-                            compute_hash,
-                        )
-                    else:
-                        sha256_hash = compute_sha256(file.full_path)
-                except (OSError, IOError, ValueError) as exc:  # File I/O or hash computation
-                    log_error(
-                        log,
-                        operation="Could not compute sha256",
-                        path=file.full_path,
-                        error=exc,
-                    )
-                    continue
+                    for future in as_completed(futures_to_file):
+                        file = futures_to_file[future]
+                        try:
+                            sha256_hash = future.result()
+                        except OperationCancelledError:
+                            if executor is not None:
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                executor = None
+                            raise
+                        except (OSError, IOError, ValueError) as exc:  # File I/O or hash computation
+                            log_error(
+                                log,
+                                operation="Could not compute sha256",
+                                path=file.full_path,
+                                error=exc,
+                            )
+                            continue
 
-                by_hash[sha256_hash].append(file)
-                full_processed += 1
-                if progress and (full_processed % FULL_HASH_PROGRESS_EVERY == 0 or full_processed == full_total):
-                    progress(
-                        OperationProgress(
-                            stage=OperationStage.HASHING,
-                            processed_files=full_processed,
-                            total_files=max(full_total, 1),
-                            message="Computing full hashes",
-                        )
-                    )
+                        by_hash[sha256_hash].append(file)
+                        full_processed += 1
+                        if progress and (
+                            full_processed % FULL_HASH_PROGRESS_EVERY == 0 or full_processed == full_total
+                        ):
+                            progress(
+                                OperationProgress(
+                                    stage=OperationStage.HASHING,
+                                    processed_files=full_processed,
+                                    total_files=max(full_total, 1),
+                                    message="Computing full hashes",
+                                )
+                            )
+                else:
+                    for file in candidate_group:
+                        _guard_cancel(cancel_event, pause_controller)
 
-            # 4) final safety: even if SHA matches, verify byte-identical to avoid any edge-case corruption/cache bugs
-            for sha256_hash, file_list in by_hash.items():
-                if len(file_list) <= 1:
-                    continue
+                        try:
+                            sha256_hash = _compute_sha256_for_file(
+                                file,
+                                cache,
+                                cancel_event,
+                                pause_controller,
+                            )
+                        except (OSError, IOError, ValueError) as exc:  # File I/O or hash computation
+                            log_error(
+                                log,
+                                operation="Could not compute sha256",
+                                path=file.full_path,
+                                error=exc,
+                            )
+                            continue
 
-                exact_groups = split_exact_groups(
-                    file_list,
-                    cancel_event=cancel_event,
-                    pause_controller=pause_controller,
-                )
+                        by_hash[sha256_hash].append(file)
+                        full_processed += 1
+                        if progress and (
+                            full_processed % FULL_HASH_PROGRESS_EVERY == 0 or full_processed == full_total
+                        ):
+                            progress(
+                                OperationProgress(
+                                    stage=OperationStage.HASHING,
+                                    processed_files=full_processed,
+                                    total_files=max(full_total, 1),
+                                    message="Computing full hashes",
+                                )
+                            )
 
-                for exact_group in exact_groups:
-                    if len(exact_group) <= 1:
+                # 4) final safety:
+                # even if SHA matches, verify byte-identical to avoid cache/corruption edge-cases
+                for sha256_hash, file_list in by_hash.items():
+                    if len(file_list) <= 1:
                         continue
-                    ordered = sorted(exact_group, key=lambda item: (item.last_write_utc, str(item.full_path).lower()))
-                    groups.append(
-                        DuplicateGroup(
-                            sha256_hash=sha256_hash,
-                            size_bytes=ordered[0].size_bytes,
-                            files=ordered,
-                        )
+
+                    exact_groups = split_exact_groups(
+                        file_list,
+                        cancel_event=cancel_event,
+                        pause_controller=pause_controller,
                     )
+
+                    for exact_group in exact_groups:
+                        if len(exact_group) <= 1:
+                            continue
+                        ordered = sorted(
+                            exact_group, key=lambda item: (item.last_write_utc, str(item.full_path).lower())
+                        )
+                        groups.append(
+                            DuplicateGroup(
+                                sha256_hash=sha256_hash,
+                                size_bytes=ordered[0].size_bytes,
+                                files=ordered,
+                            )
+                        )
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=False)
 
         duplicate_groups = sorted(groups, key=lambda item: (-len(item.files), -item.size_bytes, item.sha256_hash))
 
@@ -298,38 +419,45 @@ class DuplicateDetector:
         limited = False
         image_count = len(image_hashes)
 
-        for bucket_map in buckets:
+        oversized_buckets = 0
+        for band_index, bucket_map in enumerate(buckets):
             for indices in bucket_map.values():
                 if len(indices) < 2:
                     continue
-                sorted_indices = sorted(indices)
-                for i, a_idx in enumerate(sorted_indices):
-                    for b_idx in sorted_indices[i + 1 :]:
-                        _guard_cancel(cancel_event, pause_controller)
+                candidate_buckets = _split_similar_bucket(indices, image_hashes, band_index)
+                if len(indices) > SIMILAR_BUCKET_SIZE_LIMIT:
+                    oversized_buckets += 1
+                for candidate_indices in candidate_buckets:
+                    sorted_indices = sorted(candidate_indices)
+                    for i, a_idx in enumerate(sorted_indices):
+                        for b_idx in sorted_indices[i + 1 :]:
+                            _guard_cancel(cancel_event, pause_controller)
 
-                        pair_key = a_idx * image_count + b_idx
-                        if pair_key in seen:
-                            continue
-                        seen.add(pair_key)
-                        compared_pairs += 1
+                            pair_key = a_idx * image_count + b_idx
+                            if pair_key in seen:
+                                continue
+                            seen.add(pair_key)
+                            compared_pairs += 1
 
-                        a_hash = image_hashes[a_idx][1]
-                        b_hash = image_hashes[b_idx][1]
-                        if hamming_distance(a_hash, b_hash) <= max_distance:
-                            union(a_idx, b_idx)
+                            a_hash = image_hashes[a_idx][1]
+                            b_hash = image_hashes[b_idx][1]
+                            if hamming_distance(a_hash, b_hash) <= max_distance:
+                                union(a_idx, b_idx)
 
-                        if progress and (compared_pairs % SIMILAR_PROGRESS_EVERY == 0):
-                            progress(
-                                OperationProgress(
-                                    stage=OperationStage.SIMILARITY,
-                                    processed_files=compared_pairs,
-                                    total_files=SIMILAR_MAX_PAIRS,
-                                    message="Comparing similar images",
+                            if progress and (compared_pairs % SIMILAR_PROGRESS_EVERY == 0):
+                                progress(
+                                    OperationProgress(
+                                        stage=OperationStage.SIMILARITY,
+                                        processed_files=compared_pairs,
+                                        total_files=SIMILAR_MAX_PAIRS,
+                                        message="Comparing similar images",
+                                    )
                                 )
-                            )
 
-                        if compared_pairs >= SIMILAR_MAX_PAIRS:
-                            limited = True
+                            if compared_pairs >= SIMILAR_MAX_PAIRS:
+                                limited = True
+                                break
+                        if limited:
                             break
                     if limited:
                         break
@@ -349,6 +477,11 @@ class DuplicateDetector:
             )
         if limited and log:
             log(f"Similar image candidate pairs limited to {SIMILAR_MAX_PAIRS} for performance.")
+        if oversized_buckets > 0 and log:
+            log(
+                "Similar image optimization: "
+                f"{oversized_buckets} large buckets split at {SIMILAR_BUCKET_SIZE_LIMIT} items."
+            )
 
         grouped: dict[int, list[FileRecord]] = defaultdict(list)
         for idx, (item, _) in enumerate(image_hashes):
@@ -382,11 +515,114 @@ def _guard_cancel(
         pause_controller.wait_if_paused(cancel_event)
 
 
-def compute_sha256(path: Path) -> str:
+def _recommended_hash_workers(total_hash_candidates: int) -> int:
+    """Pick an IO-friendly worker count based on dataset size and CPU count."""
+    override = os.environ.get("ARCHIFLOW_HASH_WORKERS")
+    if override:
+        try:
+            forced = int(override.strip())
+            if forced > 0:
+                return forced
+        except ValueError:
+            pass
+    if total_hash_candidates < HASH_PARALLEL_MIN_FILES:
+        return 1
+    cpu_count = max(1, os.cpu_count() or 4)
+    # Hashing is IO-bound on spinning disks and mixed on SSD; 2x CPUs is a practical ceiling.
+    upper = min(HASH_PARALLEL_MAX_WORKERS, cpu_count * 2)
+    # Avoid over-provisioning for small candidate counts.
+    tuned = min(upper, max(1, total_hash_candidates // 2))
+    return max(1, tuned)
+
+
+def _compute_sha256_for_file(
+    file: FileRecord,
+    cache: HashCacheService | None,
+    cancel_event: threading.Event | None,
+    pause_controller: PauseControllerLike | None,
+) -> str:
+    """Compute SHA-256 for a file record using cache when available."""
+    if cache is not None:
+        return cache.get_or_compute_sha256(
+            file.full_path,
+            file.size_bytes,
+            file.last_write_utc,
+            cast(
+                Callable[[], str],
+                partial(
+                    compute_sha256,
+                    file.full_path,
+                    cancel_event=cancel_event,
+                    pause_controller=pause_controller,
+                ),
+            ),
+        )
+    return compute_sha256(
+        file.full_path,
+        cancel_event=cancel_event,
+        pause_controller=pause_controller,
+    )
+
+
+def _compute_quick_signature_for_file(
+    file: FileRecord,
+    cache: HashCacheService | None,
+    cancel_event: threading.Event | None,
+    pause_controller: PauseControllerLike | None,
+) -> str:
+    """Compute quick signature for a file record using cache when available."""
+    if cache is not None:
+        return cache.get_or_compute_quick_signature(
+            file.full_path,
+            file.size_bytes,
+            file.last_write_utc,
+            cast(
+                Callable[[], str],
+                partial(
+                    compute_quick_signature,
+                    file.full_path,
+                    cancel_event=cancel_event,
+                    pause_controller=pause_controller,
+                ),
+            ),
+        )
+    return compute_quick_signature(
+        file.full_path,
+        cancel_event=cancel_event,
+        pause_controller=pause_controller,
+    )
+
+
+def _split_similar_bucket(
+    indices: list[int],
+    image_hashes: list[tuple[FileRecord, int]],
+    band_index: int,
+) -> list[list[int]]:
+    """Split very large similar-image buckets into deterministic sub-buckets."""
+    if len(indices) <= SIMILAR_BUCKET_SIZE_LIMIT:
+        return [indices]
+
+    shift = ((band_index + 1) * SIMILAR_BAND_BITS) % SIMILAR_HASH_BITS
+    mask = (1 << SIMILAR_SECONDARY_BITS) - 1
+    secondary: dict[int, list[int]] = defaultdict(list)
+    for idx in indices:
+        value = image_hashes[idx][1]
+        secondary[(value >> shift) & mask].append(idx)
+
+    return [group for group in secondary.values() if len(group) > 1]
+
+
+def compute_sha256(
+    path: Path,
+    *,
+    cancel_event: threading.Event | None = None,
+    pause_controller: PauseControllerLike | None = None,
+) -> str:
     """Compute full SHA-256 digest for file content."""
     hasher = hashlib.sha256()
     with path.open("rb") as stream:
         while True:
+            _guard_cancel(cancel_event, pause_controller)
             chunk = stream.read(1024 * 1024)
             if not chunk:
                 break
@@ -394,7 +630,12 @@ def compute_sha256(path: Path) -> str:
     return hasher.hexdigest().lower()
 
 
-def compute_quick_signature(path: Path) -> str:
+def compute_quick_signature(
+    path: Path,
+    *,
+    cancel_event: threading.Event | None = None,
+    pause_controller: PauseControllerLike | None = None,
+) -> str:
     """
     Fast content signature using a few slices of the file. Used only to filter candidates,
     never as the final truth (full SHA + exact compare is used for that).
@@ -420,6 +661,7 @@ def compute_quick_signature(path: Path) -> str:
 
     with path.open("rb") as stream:
         for off, ln in offsets:
+            _guard_cancel(cancel_event, pause_controller)
             stream.seek(off)
             chunk = stream.read(ln)
             h.update(chunk)
@@ -441,34 +683,40 @@ def split_exact_groups(
         return [files]
 
     groups: list[list[FileRecord]] = []
-    used = [False] * len(files)
-
-    for i in range(len(files)):
+    remaining = list(files)
+    while remaining:
         _guard_cancel(cancel_event, pause_controller)
-        if used[i]:
-            continue
-        base = files[i]
-        bucket = [base]
-        used[i] = True
-
-        for j in range(i + 1, len(files)):
+        base = remaining[0]
+        current = [base]
+        next_remaining: list[FileRecord] = []
+        for candidate in remaining[1:]:
             _guard_cancel(cancel_event, pause_controller)
-            if used[j]:
+            if candidate.size_bytes != base.size_bytes:
+                next_remaining.append(candidate)
                 continue
-            if files[j].size_bytes != base.size_bytes:
+            if candidate.full_path == base.full_path:
                 continue
-            if files[j].full_path == base.full_path:
-                continue
-            if files_equal(base.full_path, files[j].full_path):
-                bucket.append(files[j])
-                used[j] = True
-
-        groups.append(bucket)
-
+            if files_equal(
+                base.full_path,
+                candidate.full_path,
+                cancel_event=cancel_event,
+                pause_controller=pause_controller,
+            ):
+                current.append(candidate)
+            else:
+                next_remaining.append(candidate)
+        groups.append(current)
+        remaining = next_remaining
     return groups
 
 
-def files_equal(a: Path, b: Path) -> bool:
+def files_equal(
+    a: Path,
+    b: Path,
+    *,
+    cancel_event: threading.Event | None = None,
+    pause_controller: PauseControllerLike | None = None,
+) -> bool:
     """
     Byte-by-byte equality check (streaming, low memory).
     """
@@ -478,6 +726,7 @@ def files_equal(a: Path, b: Path) -> bool:
     buf = 1024 * 1024
     with a.open("rb") as fa, b.open("rb") as fb:
         while True:
+            _guard_cancel(cancel_event, pause_controller)
             ca = fa.read(buf)
             cb = fb.read(buf)
             if ca != cb:

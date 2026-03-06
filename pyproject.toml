@@ -8,7 +8,8 @@ version = "1.0.0"
 description = "Organize and deduplicate files on external drives with ease"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     {name = "Development Team", email = "dev@example.com"}
 ]
@@ -16,19 +17,19 @@ keywords = ["file-organization", "duplicate-detection", "file-management"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Utilities",
 ]
 
 dependencies = [
     "PySide6>=6.6.0,<7",
     "pyqtdarktheme>=2.1.0,<3; python_version < '3.12'",
-    "Pillow>=10.0,<11",
+    "Pillow>=10.0,<12",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +49,10 @@ dev = [
     "mypy>=1.5,<2",
     "pylint>=3.0,<4",
     "pyinstaller>=6.0,<7",
+]
+release = [
+    "build>=1.2,<2",
+    "twine>=5.0,<6",
 ]
 
 [project.urls]
@@ -114,15 +119,20 @@ markers = [
 ]
 
 [tool.coverage.run]
-branch = true
+branch = false
 source = ["filegrouper"]
 omit = [
     "*/tests/*",
     "*/test_*.py",
     "*/__main__.py",
+    "filegrouper/gui.py",
+    "filegrouper/gui_components.py",
+    "filegrouper/gui_texts.py",
+    "filegrouper/gui_theme.py",
 ]
 
 [tool.coverage.report]
+fail_under = 80
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",

@@ -15,8 +15,9 @@ from filegrouper.pipeline import RunResult
 @pytest.fixture(autouse=True)
 def isolate_logger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("ARCHIFLOW_LOG_DIR", str(tmp_path / "logs"))
-    monkeypatch.setattr(logger_module, "_CONFIGURED", False)
-    monkeypatch.setattr(logger_module, "_ACTIVE_LOG_FILE", None)
+    monkeypatch.setenv("ARCHIFLOW_CONFIG_FILE", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("ARCHIFLOW_PROFILE_PATH", str(tmp_path / "profiles.json"))
+    logger_module.reset_logging_state()
     logging.getLogger(logger_module.LOGGER_NAME).handlers.clear()
 
 

@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 from pathlib import Path
 
+from .config_service import AppConfig, AppConfigService
 from .errors import OperationCancelledError
 from .logger import configure_logging, get_logger
-from .models import DedupeMode, ExecutionScope, OperationProgress, OrganizationMode, ScanFilterOptions
+from .models import DedupeMode, ExecutionScope, OperationProfile, OperationProgress, OrganizationMode, ScanFilterOptions
 from .pause_controller import PauseController
 from .pipeline import FileGrouperEngine, RunOptions, RunResult
+from .profile_service import ProfileService
 from .utils import format_size
 from .validators import (
     ValidationError,
@@ -44,24 +47,27 @@ def build_parser() -> argparse.ArgumentParser:
     preview = sub.add_parser("preview", help="Scan + duplicate analysis")
     preview.add_argument("--source", required=True)
     preview.add_argument("--report")
+    preview.add_argument("--profile")
+    preview.add_argument("--similar-images", action=argparse.BooleanOptionalAction, default=None)
 
     apply_cmd = sub.add_parser("apply", help="Apply grouping and/or duplicate cleanup")
     apply_cmd.add_argument("--source", required=True)
     apply_cmd.add_argument("--target")
-    apply_cmd.add_argument(
-        "--mode", choices=[item.value for item in OrganizationMode], default=OrganizationMode.COPY.value
-    )
-    apply_cmd.add_argument("--dedupe", choices=[item.value for item in DedupeMode], default=DedupeMode.QUARANTINE.value)
+    apply_cmd.add_argument("--mode", choices=[item.value for item in OrganizationMode], default=None)
+    apply_cmd.add_argument("--dedupe", choices=[item.value for item in DedupeMode], default=None)
     apply_cmd.add_argument(
         "--scope",
         choices=[item.value for item in ExecutionScope],
-        default=ExecutionScope.GROUP_AND_DEDUPE.value,
+        default=None,
     )
-    apply_cmd.add_argument("--dry-run", action="store_true")
-    apply_cmd.add_argument("--similar-images", action="store_true")
+    apply_cmd.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=None)
+    apply_cmd.add_argument("--similar-images", action=argparse.BooleanOptionalAction, default=None)
+    apply_cmd.add_argument("--profile")
     apply_cmd.add_argument("--report")
 
     sub.add_parser("gui", help="Open desktop GUI")
+    profiles = sub.add_parser("profiles", help="List saved operation profiles")
+    profiles.add_argument("--json", action="store_true")
     return parser
 
 
@@ -78,10 +84,32 @@ def main(argv: list[str] | None = None) -> int:
         >>> # main(["scan", "--source", "/tmp/data"])
         >>> # Returns 0 on success.
     """
-    log_file = configure_logging()
+    config_service = AppConfigService()
+    app_config = config_service.load_resolved_config()
+    if app_config.console_log_level and not os.environ.get("ARCHIFLOW_CONSOLE_LOG_LEVEL"):
+        os.environ["ARCHIFLOW_CONSOLE_LOG_LEVEL"] = app_config.console_log_level
+
+    log_file = configure_logging(log_dir=app_config.log_dir, level=app_config.log_level or None)
     app_logger = get_logger("cli")
-    app_logger.info("CLI started", extra={"transaction_id": ""})
+    app_logger.info(
+        f"CLI started. config_file={config_service.config_path}",
+        extra={"transaction_id": ""},
+    )
     args = build_parser().parse_args(argv)
+    profile_service = ProfileService()
+
+    if args.command == "profiles":
+        profiles = profile_service.load_profiles()
+        if args.json:
+            payload = [profile.to_dict() for profile in profiles]
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
+        else:
+            print(f"Profiles ({len(profiles)}):")
+            for profile in profiles:
+                default_tag = " (default)" if profile.name == app_config.default_profile else ""
+                print(f"- {profile.name}{default_tag}")
+        return 0
+
     if args.command in {None, "gui"}:
         try:
             from .gui import launch_gui
@@ -106,6 +134,12 @@ def main(argv: list[str] | None = None) -> int:
     engine = FileGrouperEngine()
     cancel_event = threading.Event()
     pause_controller = PauseController()
+    try:
+        selected_profile = _resolve_profile(args, profile_service, app_config.default_profile)
+    except ValidationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        app_logger.error(f"Profile resolution failed: {exc}", extra={"transaction_id": ""})
+        return 1
 
     def log(message: str) -> None:
         print(message)
@@ -129,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
             scope = ExecutionScope.GROUP_AND_DEDUPE
             target_path = None
         else:  # apply
-            scope = ExecutionScope(args.scope)
+            scope = _resolve_apply_scope(args, selected_profile, app_config)
             # Validate target path (may be required depending on scope)
             target_path = validate_target_path(args.target, scope.includes_grouping)
 
@@ -140,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(args, "similar_images", False):
             validate_similarity_max_distance(10)  # Default hamming distance
 
-    except ValidationError as exc:
+    except (ValidationError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         app_logger.error(f"Input validation failed: {exc}", extra={"transaction_id": ""})
         return 1
@@ -158,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
             filter_options=ScanFilterOptions(),
         )
     elif args.command == "preview":
+        detect_similar = _resolve_preview_similar(args, selected_profile, app_config)
         run_options = RunOptions(
             source_path=source_path,
             target_path=None,
@@ -165,21 +200,23 @@ def main(argv: list[str] | None = None) -> int:
             dedupe_mode=DedupeMode.QUARANTINE,
             execution_scope=ExecutionScope.GROUP_AND_DEDUPE,
             dry_run=True,
-            detect_similar_images=False,
+            detect_similar_images=detect_similar,
             apply_changes=False,
-            filter_options=ScanFilterOptions(),
+            filter_options=selected_profile.filter_options if selected_profile else ScanFilterOptions(),
         )
     else:
+        if selected_profile is not None:
+            log(f"Profil yuklendi: {selected_profile.name}")
         run_options = RunOptions(
             source_path=source_path,
             target_path=target_path,
-            organization_mode=OrganizationMode(args.mode),
-            dedupe_mode=DedupeMode(args.dedupe),
+            organization_mode=_resolve_apply_mode(args, selected_profile, app_config),
+            dedupe_mode=_resolve_apply_dedupe(args, selected_profile, app_config),
             execution_scope=scope,
-            dry_run=bool(args.dry_run),
-            detect_similar_images=bool(args.similar_images),
+            dry_run=_resolve_apply_dry_run(args, selected_profile, app_config),
+            detect_similar_images=_resolve_apply_similar(args, selected_profile, app_config),
             apply_changes=True,
-            filter_options=ScanFilterOptions(),
+            filter_options=selected_profile.filter_options if selected_profile else ScanFilterOptions(),
         )
 
     error = engine.validate_paths(run_options.source_path, run_options.target_path, run_options.execution_scope)
@@ -229,6 +266,72 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     return 0
+
+
+def _resolve_profile(args: argparse.Namespace, service: ProfileService, default_name: str) -> OperationProfile | None:
+    """Resolve profile from CLI argument or configured default profile name."""
+    if getattr(args, "command", None) not in {"apply", "preview"}:
+        return None
+    requested = (getattr(args, "profile", None) or default_name or "").strip()
+    if not requested:
+        return None
+    profiles = service.load_profiles()
+    for profile in profiles:
+        if profile.name.lower() == requested.lower():
+            return profile
+    raise ValidationError(f"Profile not found: {requested}")
+
+
+def _resolve_apply_scope(
+    args: argparse.Namespace, profile: OperationProfile | None, config: AppConfig
+) -> ExecutionScope:
+    if args.scope:
+        return ExecutionScope(args.scope)
+    if profile is not None:
+        return profile.execution_scope
+    return config.default_scope
+
+
+def _resolve_apply_mode(
+    args: argparse.Namespace, profile: OperationProfile | None, config: AppConfig
+) -> OrganizationMode:
+    if args.mode:
+        return OrganizationMode(args.mode)
+    if profile is not None:
+        return profile.organization_mode
+    return config.default_mode
+
+
+def _resolve_apply_dedupe(args: argparse.Namespace, profile: OperationProfile | None, config: AppConfig) -> DedupeMode:
+    if args.dedupe:
+        return DedupeMode(args.dedupe)
+    if profile is not None:
+        return profile.dedupe_mode
+    return config.default_dedupe
+
+
+def _resolve_apply_dry_run(args: argparse.Namespace, profile: OperationProfile | None, config: AppConfig) -> bool:
+    if args.dry_run is not None:
+        return bool(args.dry_run)
+    if profile is not None:
+        return profile.is_dry_run
+    return config.default_dry_run
+
+
+def _resolve_apply_similar(args: argparse.Namespace, profile: OperationProfile | None, config: AppConfig) -> bool:
+    if args.similar_images is not None:
+        return bool(args.similar_images)
+    if profile is not None:
+        return profile.detect_similar_images
+    return config.default_similar_images
+
+
+def _resolve_preview_similar(args: argparse.Namespace, profile: OperationProfile | None, config: AppConfig) -> bool:
+    if args.similar_images is not None:
+        return bool(args.similar_images)
+    if profile is not None:
+        return profile.detect_similar_images
+    return config.default_similar_images
 
 
 def print_summary(result: RunResult) -> None:

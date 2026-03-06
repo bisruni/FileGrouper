@@ -84,6 +84,16 @@ class TransactionStatus(str, Enum):
     FAILED = "failed"
 
 
+class TransactionLifecycleStatus(str, Enum):
+    """Lifecycle state of a full transaction journal."""
+
+    RUNNING = "running"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    ROLLED_BACK = "rolled_back"
+
+
 @dataclass(slots=True)
 class FileRecord:
     """Normalized scanned file metadata."""
@@ -351,6 +361,13 @@ class OperationTransaction:
     source_root: Path
     target_root: Path
     entries: list[TransactionEntry] = field(default_factory=list)
+    lifecycle_status: TransactionLifecycleStatus = TransactionLifecycleStatus.RUNNING
+    checkpoint_stage: str = "initialized"
+    checkpoint_processed_files: int = 0
+    checkpoint_total_files: int = 0
+    checkpoint_message: str | None = None
+    updated_at_utc: datetime | None = None
+    interruption_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize transaction journal into JSON-compatible dictionary."""
@@ -360,17 +377,34 @@ class OperationTransaction:
             "source_root": str(self.source_root),
             "target_root": str(self.target_root),
             "entries": [entry.to_dict() for entry in self.entries],
+            "lifecycle_status": self.lifecycle_status.value,
+            "checkpoint_stage": self.checkpoint_stage,
+            "checkpoint_processed_files": self.checkpoint_processed_files,
+            "checkpoint_total_files": self.checkpoint_total_files,
+            "checkpoint_message": self.checkpoint_message,
+            "updated_at_utc": self.updated_at_utc.isoformat() if self.updated_at_utc else None,
+            "interruption_reason": self.interruption_reason,
         }
 
     @staticmethod
     def from_dict(payload: dict[str, Any]) -> "OperationTransaction":
         """Create transaction journal model from persisted payload."""
+        updated_at = payload.get("updated_at_utc")
         return OperationTransaction(
             transaction_id=payload["transaction_id"],
             created_at_utc=datetime.fromisoformat(payload["created_at_utc"]),
             source_root=Path(payload["source_root"]),
             target_root=Path(payload["target_root"]),
             entries=[TransactionEntry.from_dict(item) for item in payload.get("entries") or []],
+            lifecycle_status=TransactionLifecycleStatus(
+                payload.get("lifecycle_status", TransactionLifecycleStatus.COMPLETED.value)
+            ),
+            checkpoint_stage=str(payload.get("checkpoint_stage", "legacy")),
+            checkpoint_processed_files=int(payload.get("checkpoint_processed_files", 0)),
+            checkpoint_total_files=int(payload.get("checkpoint_total_files", 0)),
+            checkpoint_message=payload.get("checkpoint_message"),
+            updated_at_utc=datetime.fromisoformat(updated_at) if updated_at else None,
+            interruption_reason=payload.get("interruption_reason"),
         )
 
 

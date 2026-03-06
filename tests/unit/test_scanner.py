@@ -89,3 +89,17 @@ def test_scanner_emits_progress_every_100_files(tmp_path: Path) -> None:
 
     assert len(records) == 105
     assert any(stage is OperationStage.SCANNING and processed == 100 for stage, processed, _ in progress_events)
+
+
+def test_scanner_scan_iter_returns_same_paths_as_scan(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    for index in range(12):
+        (source / f"f{index}.txt").write_text(str(index), encoding="utf-8")
+
+    scanner = FileScanner()
+    from_iter = list(scanner.scan_iter(source))
+    from_scan = scanner.scan(source)
+
+    assert {str(item.full_path) for item in from_iter} == {str(item.full_path) for item in from_scan}
+    assert sum(item.size_bytes for item in from_iter) == sum(item.size_bytes for item in from_scan)

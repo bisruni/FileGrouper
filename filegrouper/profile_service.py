@@ -91,6 +91,10 @@ class ProfileService:
 
 def default_profile_path() -> Path:
     """Return platform-specific profile JSON path."""
+    env_path = os.getenv("ARCHIFLOW_PROFILE_PATH", "").strip()
+    if env_path:
+        return Path(env_path).expanduser().resolve()
+
     if os.name == "nt":
         root = Path(os.getenv("APPDATA", str(Path.home() / "AppData" / "Roaming")))
     elif sys_platform_is_macos():

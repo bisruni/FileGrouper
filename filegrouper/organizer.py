@@ -30,6 +30,7 @@ from .models import (
     OrganizationMode,
     TransactionAction,
     TransactionEntry,
+    TransactionLifecycleStatus,
     TransactionStatus,
 )
 
@@ -116,12 +117,41 @@ class FileOrganizer:
 
         to_remove = list(unique_remove.values())
         if not to_remove:
+            self._update_transaction_checkpoint(
+                transaction=transaction,
+                transaction_service=transaction_service,
+                transaction_file_path=transaction_file_path,
+                stage="dedupe",
+                processed_files=0,
+                total_files=0,
+                message="No duplicates to process.",
+            )
             return []
 
         quarantine_root = quarantine_dir(target_root) / datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._update_transaction_checkpoint(
+            transaction=transaction,
+            transaction_service=transaction_service,
+            transaction_file_path=transaction_file_path,
+            stage="dedupe",
+            processed_files=0,
+            total_files=len(to_remove),
+            message="Duplicate processing started.",
+            force=True,
+        )
 
         for index, duplicate in enumerate(to_remove, start=1):
             if cancel_event is not None and cancel_event.is_set():
+                self._update_transaction_checkpoint(
+                    transaction=transaction,
+                    transaction_service=transaction_service,
+                    transaction_file_path=transaction_file_path,
+                    stage="dedupe",
+                    processed_files=index - 1,
+                    total_files=len(to_remove),
+                    message="Duplicate processing cancelled.",
+                    force=True,
+                )
                 raise OperationCancelledError()
             if pause_controller is not None:
                 pause_controller.wait_if_paused(cancel_event)
@@ -205,6 +235,15 @@ class FileOrganizer:
                         message="Processing duplicates",
                     )
                 )
+            self._update_transaction_checkpoint(
+                transaction=transaction,
+                transaction_service=transaction_service,
+                transaction_file_path=transaction_file_path,
+                stage="dedupe",
+                processed_files=index,
+                total_files=len(to_remove),
+                message="Duplicate processing in progress.",
+            )
 
         return to_remove
 
@@ -229,11 +268,31 @@ class FileOrganizer:
         if not dry_run:
             target_root.mkdir(parents=True, exist_ok=True)
 
-        total = total_files or 0
+        total = total_files if total_files is not None else 0
         last_index = 0
+        self._update_transaction_checkpoint(
+            transaction=transaction,
+            transaction_service=transaction_service,
+            transaction_file_path=transaction_file_path,
+            stage="organize",
+            processed_files=0,
+            total_files=total,
+            message="Organization started.",
+            force=True,
+        )
         for index, file in enumerate(files, start=1):
             last_index = index
             if cancel_event is not None and cancel_event.is_set():
+                self._update_transaction_checkpoint(
+                    transaction=transaction,
+                    transaction_service=transaction_service,
+                    transaction_file_path=transaction_file_path,
+                    stage="organize",
+                    processed_files=index - 1,
+                    total_files=total,
+                    message="Organization cancelled.",
+                    force=True,
+                )
                 raise OperationCancelledError()
             if pause_controller is not None:
                 pause_controller.wait_if_paused(cancel_event)
@@ -296,23 +355,44 @@ class FileOrganizer:
                 )
 
             if progress and index % ORGANIZE_PROGRESS_EVERY == 0:
+                progress_total = total if total > 0 else index
                 progress(
                     OperationProgress(
                         stage=OperationStage.ORGANIZING,
                         processed_files=index,
-                        total_files=total,
+                        total_files=progress_total,
                         message="Organizing files",
                     )
                 )
-        if progress and total > 0 and last_index % ORGANIZE_PROGRESS_EVERY != 0:
+            self._update_transaction_checkpoint(
+                transaction=transaction,
+                transaction_service=transaction_service,
+                transaction_file_path=transaction_file_path,
+                stage="organize",
+                processed_files=index,
+                total_files=total,
+                message="Organization in progress.",
+            )
+        if progress and last_index > 0 and last_index % ORGANIZE_PROGRESS_EVERY != 0:
+            progress_total = total if total > 0 else last_index
             progress(
                 OperationProgress(
                     stage=OperationStage.ORGANIZING,
                     processed_files=last_index,
-                    total_files=total,
+                    total_files=progress_total,
                     message="Organizing files",
                 )
             )
+        self._update_transaction_checkpoint(
+            transaction=transaction,
+            transaction_service=transaction_service,
+            transaction_file_path=transaction_file_path,
+            stage="organize",
+            processed_files=last_index,
+            total_files=total,
+            message="Organization stage completed.",
+            force=True,
+        )
 
     def _append_transaction_entry(
         self,
@@ -375,6 +455,34 @@ class FileOrganizer:
             transaction_service,
             transaction_file_path,
             force=True,
+        )
+
+    def _update_transaction_checkpoint(
+        self,
+        *,
+        transaction: OperationTransaction | None,
+        transaction_service: TransactionService | None,
+        transaction_file_path: Path | None,
+        stage: str,
+        processed_files: int,
+        total_files: int,
+        message: str | None,
+        force: bool = False,
+    ) -> None:
+        """Update transaction checkpoint fields and persist with rate-limited flush."""
+        if transaction is None:
+            return
+        transaction.lifecycle_status = TransactionLifecycleStatus.RUNNING
+        transaction.checkpoint_stage = stage
+        transaction.checkpoint_processed_files = max(0, processed_files)
+        transaction.checkpoint_total_files = max(0, total_files)
+        transaction.checkpoint_message = message
+        transaction.updated_at_utc = datetime.now(timezone.utc)
+        self._flush_transaction(
+            transaction,
+            transaction_service,
+            transaction_file_path,
+            force=force,
         )
 
 

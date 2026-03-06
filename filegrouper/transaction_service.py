@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from .constants import transactions_dir
 from .errors import TransactionError, record_error
-from .models import OperationSummary, OperationTransaction, TransactionAction, TransactionStatus
+from .models import (
+    OperationSummary,
+    OperationTransaction,
+    TransactionAction,
+    TransactionLifecycleStatus,
+    TransactionStatus,
+)
 
 LogFn = Callable[[str], None]
 
@@ -108,6 +115,46 @@ class TransactionService:
             raise TransactionError(f"No transaction file found for undo under '{target_root}'.")
         return self.undo_transaction(latest, log=log)
 
+    def find_recoverable_transactions(self, target_root: Path) -> list[Path]:
+        """Return transaction files that are likely interrupted/incomplete."""
+        tx_root = transactions_dir(target_root)
+        if not tx_root.is_dir():
+            return []
+
+        recoverable: list[Path] = []
+        files = sorted(tx_root.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+        for item in files:
+            try:
+                tx = self.load(item)
+            except (OSError, IOError, ValueError, json.JSONDecodeError):
+                continue
+            if self._is_transaction_recoverable(tx):
+                recoverable.append(item)
+        return recoverable
+
+    def recover_interrupted_transactions(self, target_root: Path, log: LogFn | None = None) -> OperationSummary:
+        """Rollback all recoverable transactions under target root."""
+        summary = OperationSummary()
+        for item in self.find_recoverable_transactions(target_root):
+            try:
+                current = self.undo_transaction(item, log=log)
+            except (OSError, IOError, RuntimeError, ValueError) as exc:
+                record_error(
+                    summary.errors,
+                    log=log,
+                    operation="Interrupted transaction recovery failed",
+                    path=item,
+                    error=exc,
+                )
+                continue
+            summary.files_copied += current.files_copied
+            summary.files_moved += current.files_moved
+            summary.duplicates_quarantined += current.duplicates_quarantined
+            summary.duplicates_deleted += current.duplicates_deleted
+            summary.errors.extend(current.errors)
+            summary.skipped_files.extend(current.skipped_files)
+        return summary
+
     def undo_transaction(self, transaction_file: Path, log: LogFn | None = None) -> OperationSummary:
         """Undo a specific transaction file, continuing through recoverable errors.
 
@@ -166,4 +213,63 @@ class TransactionService:
                     context={"action": entry.action.value},
                 )
 
+        verification_issues = self._verify_rollback_state(transaction)
+        for issue in verification_issues:
+            summary.errors.append(issue)
+            if log:
+                log(issue)
+
+        transaction.lifecycle_status = TransactionLifecycleStatus.ROLLED_BACK
+        transaction.checkpoint_stage = "undo_completed"
+        transaction.checkpoint_processed_files = len(transaction.entries)
+        transaction.checkpoint_total_files = len(transaction.entries)
+        transaction.checkpoint_message = (
+            f"Rollback completed with {len(summary.errors)} warning/error(s)."
+            if summary.errors
+            else "Rollback completed."
+        )
+        transaction.updated_at_utc = datetime.now(timezone.utc)
+        transaction.interruption_reason = None
+        self.save_transaction_to_path(transaction, transaction_file)
+
         return summary
+
+    def verify_rollback(self, transaction_file: Path) -> list[str]:
+        """Verify rollback state for a transaction file and return issues."""
+        return self._verify_rollback_state(self.load(transaction_file))
+
+    @staticmethod
+    def _is_transaction_recoverable(transaction: OperationTransaction) -> bool:
+        if transaction.lifecycle_status is TransactionLifecycleStatus.ROLLED_BACK:
+            return False
+        if transaction.lifecycle_status in {
+            TransactionLifecycleStatus.RUNNING,
+            TransactionLifecycleStatus.CANCELLED,
+            TransactionLifecycleStatus.FAILED,
+        }:
+            return True
+        return any(entry.status is not TransactionStatus.DONE for entry in transaction.entries)
+
+    @staticmethod
+    def _verify_rollback_state(transaction: OperationTransaction) -> list[str]:
+        issues: list[str] = []
+        for entry in transaction.entries:
+            if entry.status is not TransactionStatus.DONE:
+                continue
+
+            if entry.action is TransactionAction.COPIED:
+                if entry.destination_path and entry.destination_path.exists():
+                    issues.append(
+                        "Rollback verification failed: " f"copied destination still exists ({entry.destination_path})."
+                    )
+            elif entry.action in {TransactionAction.MOVED, TransactionAction.QUARANTINED_DUPLICATE}:
+                if not entry.source_path.exists():
+                    issues.append(
+                        "Rollback verification failed: " f"source missing after rollback ({entry.source_path})."
+                    )
+                if entry.destination_path and entry.destination_path.exists():
+                    issues.append(
+                        "Rollback verification failed: "
+                        f"destination still exists after rollback ({entry.destination_path})."
+                    )
+        return issues

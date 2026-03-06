@@ -7,11 +7,11 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
-from .constants import cache_file_path, reports_dir
+from .constants import HASH_CACHE_MAX_ENTRIES, cache_file_path, reports_dir
 from .duplicate_detector import DuplicateDetector
-from .errors import record_error
+from .errors import OperationCancelledError, record_error
 from .hash_cache import HashCacheService
 from .logger import get_logger
 from .models import (
@@ -27,6 +27,7 @@ from .models import (
     OrganizationMode,
     ScanFilterOptions,
     SimilarImageGroup,
+    TransactionLifecycleStatus,
 )
 from .organizer import FileOrganizer
 from .pause_controller import PauseController
@@ -153,22 +154,41 @@ class FileGrouperEngine:
 
         scanner_errors: list[str] = []
         scanner_skipped: list[str] = []
-        files = self.scanner.scan(
-            source,
-            filter_options=options.filter_options,
-            log=log,
-            progress=progress,
-            errors=scanner_errors,
-            skipped_files=scanner_skipped,
-            cancel_event=cancel_event,
-            pause_controller=pause_controller,
-        )
+        files: list[FileRecord] = []
+        total_files_scanned = 0
+        total_bytes_scanned = 0
+        if options.execution_scope.includes_dedupe:
+            files = self.scanner.scan(
+                source,
+                filter_options=options.filter_options,
+                log=log,
+                progress=progress,
+                errors=scanner_errors,
+                skipped_files=scanner_skipped,
+                cancel_event=cancel_event,
+                pause_controller=pause_controller,
+            )
+            total_files_scanned = len(files)
+            total_bytes_scanned = sum(item.size_bytes for item in files)
+        elif not options.apply_changes or not options.execution_scope.includes_grouping:
+            for record in self.scanner.scan_iter(
+                source,
+                filter_options=options.filter_options,
+                log=log,
+                progress=progress,
+                errors=scanner_errors,
+                skipped_files=scanner_skipped,
+                cancel_event=cancel_event,
+                pause_controller=pause_controller,
+            ):
+                total_files_scanned += 1
+                total_bytes_scanned += record.size_bytes
 
         duplicate_groups: list[DuplicateGroup] = []
         similar_groups: list[SimilarImageGroup] = []
         cache: HashCacheService | None = None
         if options.execution_scope.includes_dedupe:
-            cache = HashCacheService(cache_file_path(source))
+            cache = HashCacheService(cache_file_path(source), max_entries=HASH_CACHE_MAX_ENTRIES)
             try:
                 duplicate_groups, similar_groups = self.detector.find_duplicates(
                     files,
@@ -184,10 +204,26 @@ class FileGrouperEngine:
                     log("Not: Benzer gorseller sadece raporlanir; silme/karantina sadece kesin kopyalara uygulanir.")
             finally:
                 cache.flush()
+                if log is not None:
+                    stats = cache.get_stats()
+                    lock_wait_ms = stats["lock_wait_ns"] / 1_000_000
+                    lock_avg_us = (
+                        (stats["lock_wait_ns"] / max(1, stats["lock_acquires"])) / 1_000
+                        if stats["lock_acquires"] > 0
+                        else 0.0
+                    )
+                    log(
+                        "Hash cache: "
+                        f"hits={stats['hits']} misses={stats['misses']} computes={stats['computes']} "
+                        f"evictions={stats['evictions']} invalidations={stats['invalidations']} "
+                        f"lock_wait_ms={lock_wait_ms:.2f} lock_avg_wait_us={lock_avg_us:.2f}"
+                    )
 
-        summary = self._build_summary(files, duplicate_groups)
-        summary.errors.extend(scanner_errors)
-        summary.skipped_files.extend(scanner_skipped)
+        summary = self._build_summary(
+            total_files_scanned=total_files_scanned,
+            total_bytes_scanned=total_bytes_scanned,
+            duplicate_groups=duplicate_groups,
+        )
 
         transaction: OperationTransaction | None = None
         transaction_path: Path | None = None
@@ -199,8 +235,18 @@ class FileGrouperEngine:
                 source_root=source,
                 target_root=target,
                 entries=[],
+                lifecycle_status=TransactionLifecycleStatus.RUNNING,
+                checkpoint_stage="created",
+                checkpoint_message="Transaction created.",
+                updated_at_utc=datetime.now(tz=timezone.utc),
             )
             if not options.dry_run:
+                recoverable = self.transaction_service.find_recoverable_transactions(target)
+                if recoverable and log is not None:
+                    log(
+                        f"Uyari: {len(recoverable)} yarim kalmis islem bulundu. "
+                        "Gerekirse geri alma/recovery calistirin."
+                    )
                 # Create transaction journal before any filesystem mutation.
                 transaction_path = self.transaction_service.save_transaction(transaction)
                 self.logger.info(
@@ -211,6 +257,12 @@ class FileGrouperEngine:
             try:
                 to_skip: list[FileRecord] = []
                 if options.execution_scope.includes_dedupe:
+                    self._set_transaction_checkpoint(
+                        transaction=transaction,
+                        transaction_path=transaction_path,
+                        stage="dedupe",
+                        message="Duplicate stage started.",
+                    )
                     to_skip = self.organizer.process_duplicates(
                         duplicate_groups,
                         dedupe_mode=options.dedupe_mode,
@@ -229,12 +281,40 @@ class FileGrouperEngine:
                     )
 
                 if options.execution_scope.includes_grouping:
-                    skip_set = {str(item.full_path).lower() for item in to_skip}
-                    remaining_total = len(files) - len(to_skip)
-                    remaining = (item for item in files if str(item.full_path).lower() not in skip_set)
+                    self._set_transaction_checkpoint(
+                        transaction=transaction,
+                        transaction_path=transaction_path,
+                        stage="organize",
+                        message="Organization stage started.",
+                    )
+                    remaining: Iterator[FileRecord]
+                    if options.execution_scope.includes_dedupe:
+                        skip_set = {str(item.full_path).lower() for item in to_skip}
+                        remaining_total = len(files) - len(to_skip)
+                        remaining = (item for item in files if str(item.full_path).lower() not in skip_set)
+                    else:
+
+                        def stream_for_grouping() -> Iterator[FileRecord]:
+                            nonlocal total_files_scanned, total_bytes_scanned
+                            for item in self.scanner.scan_iter(
+                                source,
+                                filter_options=options.filter_options,
+                                log=log,
+                                progress=progress,
+                                errors=scanner_errors,
+                                skipped_files=scanner_skipped,
+                                cancel_event=cancel_event,
+                                pause_controller=pause_controller,
+                            ):
+                                total_files_scanned += 1
+                                total_bytes_scanned += item.size_bytes
+                                yield item
+
+                        remaining_total = None
+                        remaining = stream_for_grouping()
                     self.organizer.organize_by_category_and_date(
                         remaining,
-                        total_files=max(0, remaining_total),
+                        total_files=max(0, remaining_total) if remaining_total is not None else None,
                         target_root=target,
                         mode=options.organization_mode,
                         dry_run=options.dry_run,
@@ -247,6 +327,33 @@ class FileGrouperEngine:
                         cancel_event=cancel_event,
                         pause_controller=pause_controller,
                     )
+                self._set_transaction_checkpoint(
+                    transaction=transaction,
+                    transaction_path=transaction_path,
+                    stage="completed",
+                    message="Apply run completed.",
+                    lifecycle_status=TransactionLifecycleStatus.COMPLETED,
+                )
+            except OperationCancelledError as exc:
+                self._set_transaction_checkpoint(
+                    transaction=transaction,
+                    transaction_path=transaction_path,
+                    stage="cancelled",
+                    message="Apply run cancelled.",
+                    lifecycle_status=TransactionLifecycleStatus.CANCELLED,
+                    interruption_reason=str(exc) or "cancelled",
+                )
+                raise
+            except Exception as exc:
+                self._set_transaction_checkpoint(
+                    transaction=transaction,
+                    transaction_path=transaction_path,
+                    stage="failed",
+                    message="Apply run failed.",
+                    lifecycle_status=TransactionLifecycleStatus.FAILED,
+                    interruption_reason=str(exc),
+                )
+                raise
             finally:
                 if not options.dry_run and transaction_path is not None:
                     self.organizer.finalize_transaction_journal(
@@ -258,6 +365,11 @@ class FileGrouperEngine:
                         f"Transaction finalized: {transaction_path}",
                         extra={"transaction_id": transaction.transaction_id if transaction else ""},
                     )
+
+        summary.total_files_scanned = total_files_scanned
+        summary.total_bytes_scanned = total_bytes_scanned
+        summary.errors.extend(scanner_errors)
+        summary.skipped_files.extend(scanner_skipped)
 
         result = RunResult(
             source_path=source,
@@ -309,11 +421,17 @@ class FileGrouperEngine:
         )
 
     @staticmethod
-    def _build_summary(files: list[FileRecord], duplicate_groups: list[DuplicateGroup]) -> OperationSummary:
+    def _build_summary(
+        *,
+        total_files_scanned: int,
+        total_bytes_scanned: int,
+        duplicate_groups: list[DuplicateGroup],
+    ) -> OperationSummary:
         """Compute aggregate summary fields from scanned files and duplicate groups.
 
         Args:
-            files: Scanned file records.
+            total_files_scanned: Total scanned file count.
+            total_bytes_scanned: Total scanned byte count.
             duplicate_groups: Duplicate groups found in scan.
 
         Returns:
@@ -322,8 +440,8 @@ class FileGrouperEngine:
         duplicate_files = sum(max(0, len(group.files) - 1) for group in duplicate_groups)
         duplicate_bytes = sum(group.size_bytes * max(0, len(group.files) - 1) for group in duplicate_groups)
         return OperationSummary(
-            total_files_scanned=len(files),
-            total_bytes_scanned=sum(item.size_bytes for item in files),
+            total_files_scanned=total_files_scanned,
+            total_bytes_scanned=total_bytes_scanned,
             duplicate_group_count=len(duplicate_groups),
             duplicate_files_found=duplicate_files,
             duplicate_bytes_reclaimable=duplicate_bytes,
@@ -351,3 +469,23 @@ class FileGrouperEngine:
                 message,
                 extra={"transaction_id": result.transaction_id or ""},
             )
+
+    def _set_transaction_checkpoint(
+        self,
+        *,
+        transaction: OperationTransaction | None,
+        transaction_path: Path | None,
+        stage: str,
+        message: str,
+        lifecycle_status: TransactionLifecycleStatus = TransactionLifecycleStatus.RUNNING,
+        interruption_reason: str | None = None,
+    ) -> None:
+        """Update transaction checkpoint metadata and persist to journal."""
+        if transaction is None or transaction_path is None:
+            return
+        transaction.lifecycle_status = lifecycle_status
+        transaction.checkpoint_stage = stage
+        transaction.checkpoint_message = message
+        transaction.updated_at_utc = datetime.now(tz=timezone.utc)
+        transaction.interruption_reason = interruption_reason
+        self.transaction_service.save_transaction_to_path(transaction, transaction_path)

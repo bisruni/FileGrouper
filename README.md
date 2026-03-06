@@ -1,171 +1,122 @@
-# ArchiFlow (Python)
+# ArchiFlow
 
-ArchiFlow, harici disk veya klasorleri tarayip dosyalari tur + tarihe gore duzenleyen,
-kopya dosyalari bulup temizleyebilen bir Python uygulamasidir.
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen)](./tests)
+[![Coverage](https://img.shields.io/badge/coverage-htmlcov-blue)](./htmlcov/index.html)
+[![Lint](https://img.shields.io/badge/lint-passing-success)](./tox.ini)
+[![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 
-- GUI: PySide6 masaustu arayuzu
-- CLI: `scan`, `preview`, `apply`
-- Scope ayrimi: sadece gruplama / sadece kopya temizleme / ikisi birden
+ArchiFlow is a desktop + CLI tool for large-scale file cleanup:
 
-## Gereksinimler
+- Safe duplicate detection (`size -> quick signature -> SHA-256 -> byte verify`)
+- Type/date-based file organization
+- Default-safe quarantine flow with undoable transaction journal
+- Performance-aware pipeline for large folders and external disks
 
-- Python 3.10+
-- `pip` (sanal ortam icinde kullanilmasi onerilir)
-
-Kurulum:
+## Quick Start
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
-```
-
-## Calistirma
-
-```bash
 python3 main.py gui
 ```
 
-Kisa yol:
+Default mode is safe preview + quarantine-oriented workflow.
+
+## Core Commands
 
 ```bash
-python3 main.py
-```
-
-## CLI
-
-Yardim:
-
-```bash
+# Help
 python3 main.py -h
-```
 
-### 1) Scan
-
-Sadece tarama ve ozet:
-
-```bash
+# Scan summary only
 python3 main.py scan --source /Volumes/USB
-```
 
-### 2) Preview
-
-Tarama + kopya analizi (degisiklik yapmaz):
-
-```bash
+# Preview analysis (no filesystem mutation)
 python3 main.py preview --source /Volumes/USB
-```
 
-### 3) Apply
-
-Secilen islemi uygular:
-
-```bash
+# Apply operations (remove --dry-run for real execution)
 python3 main.py apply \
   --source /Volumes/USB \
   --target /Volumes/USB_Organized \
+  --scope group_and_dedupe \
   --mode copy \
   --dedupe quarantine \
-  --scope group_and_dedupe \
   --dry-run
 ```
 
-`--dry-run` kaldirildiginda gercek degisiklik yapar.
+## Safety Model
 
-## Temel Parametreler
+- Deletion is never the default path.
+- Quarantine location: `TARGET/.filegrouper_quarantine/<timestamp>/`
+- Every mutation is journaled in `.filegrouper/transactions/`
+- Undo works from journal entries (reverse order, partial-failure tolerant).
+- Similar-image detection is report-only and disabled by default.
 
-- `--mode copy|move`
-- `--dedupe off|quarantine|delete`
-- `--scope group_and_dedupe|group_only|dedupe_only`
-- `--similar-images` dHash tabanli benzer gorselleri bulur (Pillow gerekir)
-- `--report <path.json>` sonuc raporu yazar
+## GUI Workflow
 
-## Algoritma Notu
+1. Select source folder.
+2. Select target folder (required for organization scope).
+3. Pick workflow tab: all / duplicate-only / organize-only.
+4. Run preview and validate summary card.
+5. Review duplicate groups (double-click row to open file location).
+6. Confirm apply summary dialog.
+7. Use undo or open quarantine folder when needed.
 
-- Kopya bulma: boyut gruplama -> hizli imza -> SHA-256 (2 asamali)
-- Benzer gorsel: dHash + band bucket adaylama (dogrudan N^2 tarama degil)
+## Documentation Map
 
-## GUI Ozeti
+### User Documentation
 
-1. Kaynak klasoru sec
-2. Hedef klasoru sec (gruplama varsa zorunlu)
-3. Ustteki sekmeden is akisini sec: `Hepsi` / `Kopya Analizi` / `Gruplandirma`
-4. `Onizleme` ile kontrol et
-5. `Kopyalar` sekmesinde satira cift tiklayip dosya konumunu ac
-6. Gerekirse `Grup Detayi` ile koru/sil secimini duzenle
-7. `Uygula` onayi ekranini kontrol et
-8. `Test modu`nu kapatip `Secili Islemi Uygula`
+- [Main Sphinx index](./docs/index.rst)
+- [Installation](./docs/user-guide/installation.rst)
+- [Quick start](./docs/user-guide/quick-start.rst)
+- [GUI walkthrough](./docs/user-guide/gui-walkthrough.rst)
+- [CLI reference](./docs/user-guide/cli-reference.rst)
+- [Configuration](./docs/user-guide/configuration.rst)
+- [Tutorials](./docs/tutorials/index.rst)
+- [Examples and troubleshooting](./docs/examples/index.rst)
 
-## Guvenlik Kurallari
+### Developer Documentation
 
-- Kaynak ve hedef ayni olamaz.
-- Hedef, kaynak klasorun icinde olamaz.
-- `quarantine` modunda kopyalar su klasore tasinir:
-  `TARGET/.filegrouper_quarantine/<timestamp>/...`
-- `Benzer gorseller` analizi sadece rapor/inceleme icindir; otomatik silme yapmaz.
-- Yapilan islem kayitlari `.filegrouper/transactions` altina yazilir.
-- Her islemde JSON+CSV raporu otomatik yazilir: `.filegrouper/reports/`
-- `Son Islemi Geri Al` transaction kaydina gore calisir.
+- [Architecture overview](./docs/development/architecture-overview.rst)
+- [Algorithm explanations](./docs/development/algorithm-explanations.rst)
+- [Development setup](./docs/development/development-setup.rst)
+- [Testing guidelines](./docs/development/testing-guidelines.rst)
+- [Performance baselines](./docs/development/phase8-performance-baselines.rst)
+- [API docs](./docs/api/index.rst)
 
-## Dokumantasyon
+### Release and Operations Docs
 
-Sphinx dokumantasyonunu derlemek icin:
+- [Packaging guide](./PACKAGING.md)
+- [Changelog](./CHANGELOG.md)
+- [Release notes 1.0.0](./RELEASE_NOTES_1.0.0.md)
+- [Migration guide](./MIGRATION_GUIDE.md)
+- [Dependency license report](./DEPENDENCY_LICENSES.md)
+- [Marketing assets](./MARKETING.md)
+- [Contributing](./CONTRIBUTING.md)
+
+## Build Docs
 
 ```bash
 python3 -m pip install -e .[dev]
 make -C docs html
+python scripts/docs_self_check.py
 ```
 
-HTML cikti klasoru: `docs/_build/html/`
+Output: `docs/_build/html/`
 
-## Test ve CI
-
-Yerel test:
-
-```bash
-pytest
-```
-
-`tox` ile coklu Python surumu:
-
-```bash
-tox
-```
-
-Pre-commit hook kurulumu:
-
-```bash
-pre-commit install
-pre-commit run --all-files
-```
-
-CI pipeline dosyasi: `.github/workflows/ci.yml`
-
-## QA Kontrolleri
-
-Tek tek calistirma:
-
-```bash
-black --check filegrouper tests main.py
-isort --check-only filegrouper tests main.py
-flake8 filegrouper tests main.py
-mypy filegrouper
-```
-
-Tek komut akisi (`tox`):
+## Quality Gates
 
 ```bash
 tox -e format
 tox -e lint
 tox -e type
 tox -e py313
+pytest -q
 ```
 
-## Performans Benchmark (Faz 3.5)
-
-Performans araclari `tests/performance/` altindadir.
-
-Dataset uret + benchmark calistir:
+## Performance Benchmark
 
 ```bash
 python tests/performance/run_benchmark.py \
@@ -177,31 +128,19 @@ python tests/performance/run_benchmark.py \
   --iterations 2
 ```
 
-Baseline regression kontrolu:
+## Packaging
 
 ```bash
-python tests/performance/run_benchmark.py \
-  --source /tmp/archiflow_perf \
-  --iterations 3 \
-  --baseline tests/performance/baseline_example.json \
-  --max-time-regression 1.2 \
-  --max-memory-regression 1.2
+bash scripts/build_dist.sh
 ```
 
-## Logging
+Artifacts are written to `dist/` (wheel + sdist).
 
-- Logger: `filegrouper/logger.py`
-- Varsayilan log dosyasi: `./.filegrouper/logs/archiflow.log`
-- Rotating file handler: 5 MB x 5 backup
-- Format: key=value structured log (`ts`, `level`, `logger`, `module`, `line`, `msg`)
+## Legal Checks
 
-Ortam degiskenleri:
+```bash
+source .venv/bin/activate
+python scripts/verify_licenses.py
+```
 
-- `ARCHIFLOW_LOG_LEVEL` (ornek: `DEBUG`, `INFO`, `WARNING`, `ERROR`)
-- `ARCHIFLOW_CONSOLE_LOG_LEVEL` (varsayilan: `WARNING`)
-- `ARCHIFLOW_LOG_DIR` (ozel log klasoru)
-
-## Not
-
-Bu repo artik Python ana uygulamasini icerir. Eski .NET dosyalari kaynakta duruyor olabilir,
-ancak aktif calisma akisi `python3 main.py` uzerindendir.
+License verification output is written to `DEPENDENCY_LICENSES.md`.

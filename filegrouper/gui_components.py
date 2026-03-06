@@ -243,6 +243,9 @@ class Worker(QObject):
     def run(self) -> None:
         """Run engine and emit completed/cancelled/failed signals."""
         try:
+            if self.cancel_event.is_set():
+                self.cancelled.emit()
+                return
             result = self.engine.run(
                 self.options,
                 log=lambda message: self.log.emit(str(message)),
@@ -256,3 +259,6 @@ class Worker(QObject):
         except Exception as exc:
             msg = f"{exc}\n\n{traceback.format_exc()}"
             self.failed.emit(msg)
+        finally:
+            # Ensure no paused state leaks into next run lifecycle.
+            self.pause_controller.resume()

@@ -12,6 +12,8 @@ TRANSACTIONS_DIRNAME = "transactions"
 REPORTS_DIRNAME = "reports"
 LOGS_DIRNAME = "logs"
 HASH_CACHE_FILENAME = "hash-cache.json"
+HASH_CACHE_MAX_ENTRIES = 200000
+CONFIG_FILENAME = "config.yaml"
 
 SCAN_PROGRESS_EVERY = 100
 ORGANIZE_PROGRESS_EVERY = 50
@@ -19,6 +21,10 @@ DUPLICATE_PROGRESS_EVERY = 50
 QUICK_HASH_PROGRESS_EVERY = 200
 FULL_HASH_PROGRESS_EVERY = 100
 SIMILAR_PROGRESS_EVERY = 2000
+HASH_PARALLEL_MIN_FILES = 8
+HASH_PARALLEL_MAX_WORKERS = 8
+SIMILAR_BUCKET_SIZE_LIMIT = 2048
+SIMILAR_SECONDARY_BITS = 8
 
 TX_FLUSH_INTERVAL_SECONDS = 1.0
 TX_FLUSH_UPDATE_THRESHOLD = 25
@@ -32,6 +38,11 @@ def app_state_dir(root: Path) -> Path:
 def cache_file_path(root: Path) -> Path:
     """Return hash cache file path under source root."""
     return app_state_dir(root) / CACHE_DIRNAME / HASH_CACHE_FILENAME
+
+
+def config_file_path(root: Path) -> Path:
+    """Return application config file path under root state directory."""
+    return app_state_dir(root) / CONFIG_FILENAME
 
 
 def reports_dir(root: Path) -> Path:
