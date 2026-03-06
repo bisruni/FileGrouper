@@ -10,8 +10,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QFont
+from PySide6.QtCore import QSize, Qt, QThread, Slot
+from PySide6.QtGui import QAction, QCloseEvent, QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QFrame,
     QSizePolicy,
     QSpacerItem,
     QStackedWidget,
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QStyle,
 )
 
 try:
@@ -46,7 +48,16 @@ except ImportError:
 
 from .config_service import AppConfig, AppConfigService
 from .constants import app_state_dir, quarantine_dir
-from .gui_components import DuplicateGroupDialog, FiltersDialog, UiFilterDraft, Worker
+from .gui_components import (
+    DuplicateGroupDialog,
+    FiltersDialog,
+    UiFilterDraft,
+    Worker,
+    apply_button_tier,
+    create_empty_state_label,
+    create_info_banner,
+    create_stat_card,
+)
 from .gui_texts import DEDUPE_ITEMS, MODE_ITEMS, TR, WORKFLOW_ITEMS
 from .gui_theme import apply_gui_theme
 from .logger import configure_logging, get_logger
@@ -130,73 +141,91 @@ class MainWindow(QMainWindow):
         self.view_stack = QStackedWidget()
         root.addWidget(self.view_stack, 1)
 
-        def metric_card(title: str, value_lbl: QLabel) -> QWidget:
-            wrap = QWidget()
-            layout = QVBoxLayout()
-            layout.setContentsMargins(8, 8, 8, 8)
-            label = QLabel(title)
-            label.setStyleSheet("color: #6b7280;")
-            value_lbl.setStyleSheet("font-weight: 700; font-size: 15px;")
-            layout.addWidget(label)
-            layout.addWidget(value_lbl)
-            wrap.setLayout(layout)
-            return wrap
-
         # ---- Welcome view ----
         welcome = QWidget()
         welcome_layout = QVBoxLayout()
-        welcome_layout.setContentsMargins(48, 56, 48, 56)
-        welcome_layout.setSpacing(16)
+        welcome_layout.setContentsMargins(40, 24, 40, 24)
+        welcome_layout.setSpacing(12)
         welcome.setLayout(welcome_layout)
 
         welcome_layout.addStretch(1)
+        hero_card = QFrame()
+        hero_card.setObjectName("heroCard")
+        hero_layout = QVBoxLayout()
+        hero_layout.setContentsMargins(32, 28, 32, 24)
+        hero_layout.setSpacing(12)
+        hero_card.setLayout(hero_layout)
+
         welcome_title = QLabel(TR["welcome_title"])
-        welcome_title.setStyleSheet("font-size: 38px; font-weight: 700; letter-spacing: 0.2px;")
+        welcome_title.setProperty("role", "heroTitle")
+        welcome_title.setWordWrap(True)
+        welcome_title.setMaximumWidth(700)
+        welcome_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         welcome_subtitle = QLabel(TR["welcome_subtitle"])
         welcome_subtitle.setWordWrap(True)
-        welcome_subtitle.setStyleSheet("color: #4b5563; font-size: 16px;")
-        welcome_layout.addWidget(welcome_title, 0, Qt.AlignmentFlag.AlignHCenter)
-        welcome_layout.addWidget(welcome_subtitle, 0, Qt.AlignmentFlag.AlignHCenter)
+        welcome_subtitle.setMaximumWidth(700)
+        welcome_subtitle.setMinimumHeight(58)
+        welcome_subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        welcome_subtitle.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        welcome_subtitle.setProperty("role", "heroSubtitle")
+        hero_layout.addWidget(welcome_title, 0, Qt.AlignmentFlag.AlignHCenter)
+        hero_layout.addWidget(welcome_subtitle, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        badges_layout = QHBoxLayout()
+        badges_layout.setSpacing(8)
+        for badge_text in ("Güvenli Önizleme", "Karantina ile Geri Al", "Hızlı Analiz"):
+            badge = QLabel(badge_text)
+            badge.setObjectName("heroBadge")
+            badges_layout.addWidget(badge)
+        hero_layout.addLayout(badges_layout)
+        hero_layout.addSpacing(4)
 
         self.welcome_pick_btn = QPushButton(TR["welcome_pick"])
-        self.welcome_pick_btn.setObjectName("primaryBtn")
-        self.welcome_pick_btn.setMinimumHeight(44)
-        self.welcome_pick_btn.setMinimumWidth(240)
+        apply_button_tier(self.welcome_pick_btn, "primary")
+        self.welcome_pick_btn.setMinimumHeight(46)
+        self.welcome_pick_btn.setMinimumWidth(300)
         self.welcome_pick_btn.clicked.connect(self._pick_source_from_welcome)
-        welcome_layout.addWidget(self.welcome_pick_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        hero_layout.addWidget(self.welcome_pick_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.welcome_recent_btn = QPushButton(TR["welcome_recent"])
+        apply_button_tier(self.welcome_recent_btn, "secondary")
         self.welcome_recent_btn.setMinimumHeight(36)
         self.welcome_recent_btn.clicked.connect(self._open_recent_source)
-        welcome_layout.addWidget(self.welcome_recent_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        hero_layout.addWidget(self.welcome_recent_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.welcome_advanced_btn = QPushButton(TR["welcome_advanced"])
-        self.welcome_advanced_btn.setFlat(True)
+        apply_button_tier(self.welcome_advanced_btn, "tertiary")
         self.welcome_advanced_btn.clicked.connect(lambda: self._show_setup(show_advanced=True))
-        welcome_layout.addWidget(self.welcome_advanced_btn, 0, Qt.AlignmentFlag.AlignHCenter)
-        welcome_layout.addStretch(2)
+        hero_layout.addWidget(self.welcome_advanced_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        hero_layout.addSpacing(2)
+
+        welcome_layout.addWidget(hero_card, 0, Qt.AlignmentFlag.AlignHCenter)
+        welcome_layout.addStretch(1)
         self.view_stack.addWidget(welcome)
 
         # ---- Setup view ----
         setup = QWidget()
         setup_layout = QVBoxLayout()
-        setup_layout.setContentsMargins(8, 8, 8, 8)
-        setup_layout.setSpacing(12)
+        setup_layout.setContentsMargins(12, 10, 12, 10)
+        setup_layout.setSpacing(10)
         setup.setLayout(setup_layout)
 
         setup_title = QLabel(TR["setup_title"])
-        setup_title.setStyleSheet("font-size: 24px; font-weight: 700;")
+        setup_title.setProperty("role", "viewTitle")
         setup_layout.addWidget(setup_title)
+        setup_layout.addWidget(create_info_banner(TR["workflow_hint"]))
 
         setup_card = QGroupBox()
         setup_card_layout = QGridLayout()
-        setup_card_layout.setHorizontalSpacing(10)
-        setup_card_layout.setVerticalSpacing(10)
+        setup_card_layout.setHorizontalSpacing(12)
+        setup_card_layout.setVerticalSpacing(12)
         setup_card.setLayout(setup_card_layout)
         setup_layout.addWidget(setup_card)
 
         self.source_lbl = QLabel(TR["source"])
         self.target_lbl = QLabel(TR["target"])
+        self.source_lbl.setObjectName("fieldLabel")
+        self.target_lbl.setObjectName("fieldLabel")
         self.source_edit = QLineEdit()
         self.target_edit = QLineEdit()
         self.source_edit.setPlaceholderText("/Volumes/USB")
@@ -206,6 +235,10 @@ class MainWindow(QMainWindow):
 
         src_btn = QPushButton(TR["browse"])
         tgt_btn = QPushButton(TR["browse"])
+        apply_button_tier(src_btn, "secondary")
+        apply_button_tier(tgt_btn, "secondary")
+        src_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
+        tgt_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
         src_btn.setMinimumHeight(36)
         tgt_btn.setMinimumHeight(36)
         src_btn.clicked.connect(self._browse_source)
@@ -220,13 +253,15 @@ class MainWindow(QMainWindow):
         setup_card_layout.addWidget(tgt_btn, 1, 2)
 
         self.scope_lbl = QLabel(TR["scope"])
+        self.scope_lbl.setObjectName("fieldLabel")
         self.workflow_combo = QComboBox()
         for title, _scope, _desc in WORKFLOW_ITEMS:
             self.workflow_combo.addItem(title)
         self.workflow_combo.setMinimumHeight(36)
         self.workflow_combo.currentIndexChanged.connect(self._on_workflow_changed)
         self.workflow_desc_lbl = QLabel(WORKFLOW_ITEMS[0][2])
-        self.workflow_desc_lbl.setStyleSheet("color: #6b7280;")
+        self.workflow_desc_lbl.setProperty("role", "viewSubtitle")
+        self.workflow_desc_lbl.setWordWrap(True)
 
         setup_card_layout.addWidget(self.scope_lbl, 2, 0)
         setup_card_layout.addWidget(self.workflow_combo, 2, 1, 1, 2)
@@ -245,36 +280,43 @@ class MainWindow(QMainWindow):
         setup_layout.addLayout(toggles_row)
 
         self.advanced_toggle_btn = QPushButton(TR["advanced_show"])
-        self.advanced_toggle_btn.setFlat(True)
+        apply_button_tier(self.advanced_toggle_btn, "tertiary")
         self.advanced_toggle_btn.clicked.connect(self._toggle_advanced_options)
         setup_layout.addWidget(self.advanced_toggle_btn, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.advanced_box = QGroupBox(TR["welcome_advanced"])
         advanced_layout = QGridLayout()
-        advanced_layout.setHorizontalSpacing(10)
+        advanced_layout.setHorizontalSpacing(12)
         advanced_layout.setVerticalSpacing(10)
         self.advanced_box.setLayout(advanced_layout)
         setup_layout.addWidget(self.advanced_box)
+        self.advanced_info_lbl = create_info_banner(TR["advanced_helper"])
+        setup_layout.insertWidget(setup_layout.count() - 1, self.advanced_info_lbl)
 
         self.mode_lbl = QLabel(TR["mode"])
+        self.mode_lbl.setObjectName("fieldLabel")
         self.mode_combo = QComboBox()
         for label, _ in MODE_ITEMS:
             self.mode_combo.addItem(label)
         self.mode_combo.setMinimumHeight(36)
 
         self.dedupe_lbl = QLabel(TR["dedupe"])
+        self.dedupe_lbl.setObjectName("fieldLabel")
         self.dedupe_combo = QComboBox()
         for label, _ in DEDUPE_ITEMS:
             self.dedupe_combo.addItem(label)
         self.dedupe_combo.setMinimumHeight(36)
 
         self.profile_lbl = QLabel(TR["profile"])
+        self.profile_lbl.setObjectName("fieldLabel")
         self.profile_combo = QComboBox()
         self.profile_combo.setMinimumHeight(36)
         self.profile_apply_btn = QPushButton(TR["profile_apply"])
+        apply_button_tier(self.profile_apply_btn, "secondary")
         self.profile_apply_btn.clicked.connect(self._apply_selected_profile)
 
         self.filters_btn = QPushButton(TR["filters"])
+        apply_button_tier(self.filters_btn, "secondary")
         self.filters_btn.clicked.connect(self._open_filters)
 
         advanced_layout.addWidget(self.mode_lbl, 0, 0)
@@ -288,9 +330,10 @@ class MainWindow(QMainWindow):
 
         setup_actions = QHBoxLayout()
         self.setup_back_btn = QPushButton(TR["back"])
+        apply_button_tier(self.setup_back_btn, "secondary")
         self.setup_back_btn.clicked.connect(self._show_welcome)
         self.preview_btn = QPushButton(TR["preview"])
-        self.preview_btn.setObjectName("primaryBtn")
+        apply_button_tier(self.preview_btn, "primary")
         self.preview_btn.setMinimumHeight(40)
         self.preview_btn.clicked.connect(lambda: self._start_run(False))
         setup_actions.addWidget(self.setup_back_btn)
@@ -303,13 +346,14 @@ class MainWindow(QMainWindow):
         # ---- Analysis view ----
         analysis = QWidget()
         analysis_layout = QVBoxLayout()
-        analysis_layout.setContentsMargins(12, 12, 12, 12)
-        analysis_layout.setSpacing(12)
+        analysis_layout.setContentsMargins(14, 14, 14, 14)
+        analysis_layout.setSpacing(10)
         analysis.setLayout(analysis_layout)
 
         analysis_title = QLabel(TR["analysis_title"])
-        analysis_title.setStyleSheet("font-size: 24px; font-weight: 700;")
+        analysis_title.setProperty("role", "viewTitle")
         analysis_layout.addWidget(analysis_title)
+        analysis_layout.addWidget(create_info_banner(TR["analysis_hint"]))
 
         stat_row = QHBoxLayout()
         self.status_lbl = QLabel(TR["ready"])
@@ -332,14 +376,16 @@ class MainWindow(QMainWindow):
         self.m_similar = QLabel("0")
 
         analysis_metrics = QHBoxLayout()
-        analysis_metrics.addWidget(metric_card(TR["sum_total"], self.m_total))
-        analysis_metrics.addWidget(metric_card(TR["sum_dupes"], self.m_dupes))
-        analysis_metrics.addWidget(metric_card("Kazanilabilir Alan", self.m_reclaim))
-        analysis_metrics.addWidget(metric_card(TR["sum_errors"], self.m_errors))
+        analysis_metrics.setSpacing(10)
+        analysis_metrics.addWidget(create_stat_card(TR["sum_total"], self.m_total))
+        analysis_metrics.addWidget(create_stat_card(TR["sum_dupes"], self.m_dupes))
+        analysis_metrics.addWidget(create_stat_card("Kazanılabilir Alan", self.m_reclaim))
+        analysis_metrics.addWidget(create_stat_card(TR["sum_errors"], self.m_errors))
         analysis_layout.addLayout(analysis_metrics)
 
         analysis_actions = QHBoxLayout()
         self.pause_btn = QPushButton(TR["pause"])
+        apply_button_tier(self.pause_btn, "secondary")
         self.pause_btn.clicked.connect(self._toggle_pause)
         self.cancel_btn = QPushButton(TR["cancel"])
         self.cancel_btn.setObjectName("dangerBtn")
@@ -354,18 +400,19 @@ class MainWindow(QMainWindow):
         # ---- Results view ----
         results = QWidget()
         results_layout = QVBoxLayout()
-        results_layout.setContentsMargins(8, 8, 8, 8)
+        results_layout.setContentsMargins(10, 10, 10, 10)
         results_layout.setSpacing(10)
         results.setLayout(results_layout)
 
         results_title = QLabel(TR["results_title"])
-        results_title.setStyleSheet("font-size: 24px; font-weight: 700;")
+        results_title.setProperty("role", "viewTitle")
         results_layout.addWidget(results_title)
+        results_layout.addWidget(create_info_banner(TR["results_hint"]))
 
         preview_box = QGroupBox(TR["preview_summary"])
         preview_layout = QGridLayout()
         preview_layout.setHorizontalSpacing(14)
-        preview_layout.setVerticalSpacing(6)
+        preview_layout.setVerticalSpacing(8)
         preview_box.setLayout(preview_layout)
         self.p_total = QLabel("0")
         self.p_dupes = QLabel("0")
@@ -381,7 +428,7 @@ class MainWindow(QMainWindow):
         preview_layout.addWidget(self.p_dupe_groups, 0, 3)
         preview_layout.addWidget(QLabel(TR["sum_dupes"]), 0, 4)
         preview_layout.addWidget(self.p_dupes, 0, 5)
-        preview_layout.addWidget(QLabel("Kazanilabilir Alan"), 0, 6)
+        preview_layout.addWidget(QLabel("Kazanılabilir Alan"), 0, 6)
         preview_layout.addWidget(self.p_reclaim, 0, 7)
         preview_layout.addWidget(QLabel(TR["sum_organize"]), 1, 0)
         preview_layout.addWidget(self.p_organize, 1, 1)
@@ -395,13 +442,16 @@ class MainWindow(QMainWindow):
 
         results_actions = QHBoxLayout()
         self.apply_btn = QPushButton(TR["apply"])
-        self.apply_btn.setObjectName("primaryBtn")
+        apply_button_tier(self.apply_btn, "primary")
         self.apply_btn.clicked.connect(lambda: self._start_run(True))
         self.rescan_btn = QPushButton(TR["rescan"])
+        apply_button_tier(self.rescan_btn, "secondary")
         self.rescan_btn.clicked.connect(lambda: self._start_run(False))
         self.pick_folder_btn = QPushButton(TR["pick_different"])
+        apply_button_tier(self.pick_folder_btn, "secondary")
         self.pick_folder_btn.clicked.connect(self._reset_for_new_operation)
         self.open_report_btn = QPushButton(TR["open_report"])
+        apply_button_tier(self.open_report_btn, "secondary")
         self.open_report_btn.clicked.connect(self._open_latest_report)
         results_actions.addWidget(self.apply_btn)
         results_actions.addWidget(self.rescan_btn)
@@ -419,6 +469,7 @@ class MainWindow(QMainWindow):
         dupes_wrap.setLayout(dupes_layout)
         dupes_toolbar = QHBoxLayout()
         self.dupe_detail_btn = QPushButton(TR["dupe_detail"])
+        apply_button_tier(self.dupe_detail_btn, "secondary")
         self.dupe_detail_btn.clicked.connect(self._open_selected_duplicate_group_dialog)
         dupes_toolbar.addWidget(self.dupe_detail_btn)
         dupes_toolbar.addItem(QSpacerItem(10, 10, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
@@ -429,19 +480,27 @@ class MainWindow(QMainWindow):
         self.dupes_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.dupes_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.dupes_table.setAlternatingRowColors(True)
-        self.dupes_table.setToolTip("Cift tiklayinca dosya konumu acilir.")
+        self.dupes_table.setToolTip("Çift tıklayınca dosya konumu açılır.")
         self.dupes_table.cellDoubleClicked.connect(self._open_duplicate_location_from_table)
+        self.dupes_empty_lbl = create_empty_state_label(TR["empty_duplicates"])
         dupes_layout.addWidget(self.dupes_table)
+        dupes_layout.addWidget(self.dupes_empty_lbl)
         self.tabs.addTab(dupes_wrap, TR["tab_dupes"])
 
         logs_wrap = QWidget()
         logs_layout = QVBoxLayout()
+        logs_layout.setContentsMargins(0, 0, 0, 0)
+        logs_layout.setSpacing(8)
         logs_wrap.setLayout(logs_layout)
         toolbar = QHBoxLayout()
         self.clear_logs_btn = QPushButton("Log temizle")
         self.open_quarantine_btn = QPushButton(TR["open_quarantine"])
         self.undo_btn = QPushButton(TR["undo"])
         self.export_btn = QPushButton(TR["export"])
+        apply_button_tier(self.clear_logs_btn, "secondary")
+        apply_button_tier(self.open_quarantine_btn, "secondary")
+        apply_button_tier(self.undo_btn, "secondary")
+        apply_button_tier(self.export_btn, "secondary")
         self.clear_logs_btn.clicked.connect(self._clear_logs)
         self.open_quarantine_btn.clicked.connect(self._open_quarantine_folder)
         self.undo_btn.clicked.connect(self._undo_last)
@@ -455,32 +514,42 @@ class MainWindow(QMainWindow):
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.logs_empty_lbl = create_empty_state_label(TR["empty_logs"])
         logs_layout.addWidget(self.log_text)
+        logs_layout.addWidget(self.logs_empty_lbl)
         self.tabs.addTab(logs_wrap, TR["tab_logs"])
 
         self.similar_text = QTextEdit()
         self.similar_text.setReadOnly(True)
         self.similar_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.similar_tab_index = self.tabs.addTab(self.similar_text, TR["tab_similar"])
+        self.similar_empty_lbl = create_empty_state_label(TR["empty_similar"])
+        similar_wrap = QWidget()
+        similar_layout = QVBoxLayout()
+        similar_layout.setContentsMargins(0, 0, 0, 0)
+        similar_layout.setSpacing(8)
+        similar_wrap.setLayout(similar_layout)
+        similar_layout.addWidget(self.similar_text)
+        similar_layout.addWidget(self.similar_empty_lbl)
+        self.similar_tab_index = self.tabs.addTab(similar_wrap, TR["tab_similar"])
         self.tabs.setTabVisible(self.similar_tab_index, False)
         self.view_stack.addWidget(results)
 
         # ---- Success view ----
         success = QWidget()
         success_layout = QVBoxLayout()
-        success_layout.setContentsMargins(48, 56, 48, 56)
-        success_layout.setSpacing(12)
+        success_layout.setContentsMargins(58, 44, 58, 44)
+        success_layout.setSpacing(10)
         success.setLayout(success_layout)
         success_layout.addStretch(1)
 
         success_title = QLabel(TR["success_title"])
-        success_title.setStyleSheet("font-size: 30px; font-weight: 700;")
+        success_title.setProperty("role", "viewTitle")
         success_subtitle = QLabel(TR["success_subtitle"])
-        success_subtitle.setStyleSheet("color: #4b5563; font-size: 14px;")
+        success_subtitle.setProperty("role", "viewSubtitle")
         self.success_processed_lbl = QLabel(f"{TR['processed_files']}: 0")
-        self.success_processed_lbl.setStyleSheet("font-size: 16px; font-weight: 600;")
+        self.success_processed_lbl.setObjectName("statValue")
         self.success_reclaim_lbl = QLabel(f"{TR['recovered_space']}: 0 B")
-        self.success_reclaim_lbl.setStyleSheet("font-size: 16px; font-weight: 600;")
+        self.success_reclaim_lbl.setObjectName("statValue")
         success_layout.addWidget(success_title, 0, Qt.AlignmentFlag.AlignHCenter)
         success_layout.addWidget(success_subtitle, 0, Qt.AlignmentFlag.AlignHCenter)
         success_layout.addWidget(self.success_processed_lbl, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -488,11 +557,13 @@ class MainWindow(QMainWindow):
 
         success_actions = QHBoxLayout()
         self.success_quarantine_btn = QPushButton(TR["open_quarantine"])
+        apply_button_tier(self.success_quarantine_btn, "secondary")
         self.success_quarantine_btn.clicked.connect(self._open_quarantine_folder)
         self.success_undo_btn = QPushButton(TR["undo"])
+        apply_button_tier(self.success_undo_btn, "secondary")
         self.success_undo_btn.clicked.connect(self._undo_last)
         self.success_new_btn = QPushButton(TR["new_operation"])
-        self.success_new_btn.setObjectName("primaryBtn")
+        apply_button_tier(self.success_new_btn, "primary")
         self.success_new_btn.clicked.connect(self._reset_for_new_operation)
         success_actions.addWidget(self.success_quarantine_btn)
         success_actions.addWidget(self.success_undo_btn)
@@ -502,19 +573,46 @@ class MainWindow(QMainWindow):
         self.view_stack.addWidget(success)
 
         m = self.menuBar().addMenu("Dosya")
-        act_quit = QAction("Cikis", self)
+        act_quit = QAction("Çıkış", self)
         act_quit.triggered.connect(self.close)
         m.addAction(act_quit)
 
         self._set_advanced_visible(False)
+        self._apply_button_icons()
+        self._refresh_empty_states()
         self._on_workflow_changed(self.workflow_combo.currentIndex())
-        self.setStyleSheet(self.styleSheet() + """
-QPushButton#primaryBtn { background: #2563eb; color: #ffffff; border: 1px solid #1d4ed8; font-weight: 600; }
-QPushButton#primaryBtn:hover { background: #1d4ed8; }
-QPushButton#primaryBtn:pressed { background: #1e40af; }
-QPushButton#dangerBtn { background: #fff5f5; color: #b91c1c; border: 1px solid #fecaca; }
-QPushButton#dangerBtn:hover { background: #fee2e2; }
-""")
+
+    def _apply_button_icons(self) -> None:
+        """Apply lightweight native icons to major actions for visual clarity."""
+        style = self.style()
+        icon_size = QSize(16, 16)
+        icon_map: list[tuple[QPushButton, QStyle.StandardPixmap]] = [
+            (self.welcome_pick_btn, QStyle.StandardPixmap.SP_DirOpenIcon),
+            (self.welcome_recent_btn, QStyle.StandardPixmap.SP_DirHomeIcon),
+            (self.welcome_advanced_btn, QStyle.StandardPixmap.SP_FileDialogDetailedView),
+            (self.setup_back_btn, QStyle.StandardPixmap.SP_ArrowBack),
+            (self.preview_btn, QStyle.StandardPixmap.SP_MediaPlay),
+            (self.profile_apply_btn, QStyle.StandardPixmap.SP_DialogApplyButton),
+            (self.filters_btn, QStyle.StandardPixmap.SP_FileDialogDetailedView),
+            (self.pause_btn, QStyle.StandardPixmap.SP_MediaPause),
+            (self.cancel_btn, QStyle.StandardPixmap.SP_DialogCancelButton),
+            (self.apply_btn, QStyle.StandardPixmap.SP_DialogApplyButton),
+            (self.rescan_btn, QStyle.StandardPixmap.SP_BrowserReload),
+            (self.pick_folder_btn, QStyle.StandardPixmap.SP_DirOpenIcon),
+            (self.open_report_btn, QStyle.StandardPixmap.SP_FileIcon),
+            (self.dupe_detail_btn, QStyle.StandardPixmap.SP_FileDialogInfoView),
+            (self.clear_logs_btn, QStyle.StandardPixmap.SP_DialogResetButton),
+            (self.open_quarantine_btn, QStyle.StandardPixmap.SP_DirIcon),
+            (self.undo_btn, QStyle.StandardPixmap.SP_ArrowBack),
+            (self.export_btn, QStyle.StandardPixmap.SP_DialogSaveButton),
+            (self.success_quarantine_btn, QStyle.StandardPixmap.SP_DirIcon),
+            (self.success_undo_btn, QStyle.StandardPixmap.SP_ArrowBack),
+            (self.success_new_btn, QStyle.StandardPixmap.SP_MediaPlay),
+        ]
+        for button, pixmap in icon_map:
+            button.setIcon(style.standardIcon(pixmap))
+            button.setIconSize(icon_size)
+        self._set_advanced_visible(self.advanced_box.isVisible())
 
     # ---- actions ----
 
@@ -540,7 +638,14 @@ QPushButton#dangerBtn:hover { background: #fee2e2; }
 
     def _set_advanced_visible(self, visible: bool) -> None:
         self.advanced_box.setVisible(visible)
+        self.advanced_info_lbl.setVisible(visible)
         self.advanced_toggle_btn.setText(TR["advanced_hide"] if visible else TR["advanced_show"])
+        toggle_icon = (
+            QStyle.StandardPixmap.SP_TitleBarShadeButton
+            if visible
+            else QStyle.StandardPixmap.SP_TitleBarUnshadeButton
+        )
+        self.advanced_toggle_btn.setIcon(self.style().standardIcon(toggle_icon))
 
     def _pick_source_from_welcome(self) -> None:
         path = QFileDialog.getExistingDirectory(self, TR["source"])
@@ -851,6 +956,7 @@ QPushButton#dangerBtn:hover { background: #fee2e2; }
         self.progress_lbl.setText("0%")
         self.progress.setRange(0, 100)
         self._set_status(TR["running"])
+        self._reset_analysis_metrics()
         self._set_preview_summary(None)
         self._last_progress_ui_update = 0.0
         self._show_analysis()
@@ -879,7 +985,7 @@ QPushButton#dangerBtn:hover { background: #fee2e2; }
         self.last_run_dedupe_mode = self._dedupe_enum()
         self.last_run_apply_changes = apply_changes
         self._log(
-            f"Calisma basladi | akis={scope.value} | mode={self.mode_combo.currentText()} | "
+            f"Çalışma başladı | akış={scope.value} | mode={self.mode_combo.currentText()} | "
             f"dedupe={self.dedupe_combo.currentText()} | dry_run={self.dry_check.isChecked()}"
         )
 
@@ -974,7 +1080,7 @@ QPushButton#dangerBtn:hover { background: #fee2e2; }
             self._add_dupe_row(group_index)
         if len(result.duplicate_groups) > visible_limit:
             self._log(
-                f"Not: {len(result.duplicate_groups) - visible_limit} kopya grup performans icin tabloda gosterilmedi."
+                f"Not: {len(result.duplicate_groups) - visible_limit} kopya grup performans için tabloda gösterilmedi."
             )
 
         for err in s.errors:
@@ -993,6 +1099,7 @@ QPushButton#dangerBtn:hover { background: #fee2e2; }
         else:
             self.tabs.setTabVisible(self.similar_tab_index, False)
             self.similar_text.clear()
+        self._refresh_empty_states()
 
         self._set_status(TR["done"])
         self._show_results()
@@ -1022,7 +1129,7 @@ QPushButton#dangerBtn:hover { background: #fee2e2; }
     def _on_cancelled(self) -> None:
         self.progress.setRange(0, 100)
         self._set_status(TR["cancelled"])
-        self._log("Islem iptal edildi. Tamamlanmayan adimlar uygulanmadi.")
+        self._log("İşlem iptal edildi. Tamamlanmayan adımlar uygulanmadı.")
         self._show_setup()
 
     @Slot(str)
@@ -1127,32 +1234,41 @@ QPushButton#dangerBtn:hover { background: #fee2e2; }
             or "kaynak klasör bulunamadı" in lowered
             or "kaynak klasor bulunamadi" in lowered
         ):
-            return "Kaynak klasor bulunamadi. Disk baglantisini ve klasor yolunu kontrol edin."
+            return "Kaynak klasör bulunamadı. Disk bağlantısını ve klasör yolunu kontrol edin."
         if (
             "source and target cannot be the same" in lowered
             or "kaynak ve hedef klasör aynı olamaz" in lowered
             or "kaynak ve hedef ayni klasor olamaz" in lowered
         ):
-            return "Kaynak ve hedef klasor ayni olamaz. Farkli bir hedef secin."
+            return "Kaynak ve hedef klasör aynı olamaz. Farklı bir hedef seçin."
         if (
             "target folder cannot be inside source" in lowered
             or "hedef klasör kaynak klasörün içinde olamaz" in lowered
             or "hedef klasor kaynak klasorun icinde olamaz" in lowered
         ):
-            return "Hedef klasor, kaynak klasorun icinde olamaz. Disarida bir hedef secin."
+            return "Hedef klasör, kaynak klasörün içinde olamaz. Dışarıda bir hedef seçin."
         if "permission" in lowered or "izin" in lowered:
-            return "Klasore erisim izni yetersiz. Farkli klasor secin veya izinleri kontrol edin."
+            return "Klasöre erişim izni yetersiz. Farklı klasör seçin veya izinleri kontrol edin."
         return message
 
     def _log(self, msg: str) -> None:
         self.log_text.append(msg)
         self.app_logger.info(msg, extra={"transaction_id": ""})
+        self._refresh_empty_states()
 
     def _clear_logs(self) -> None:
         self.log_text.clear()
+        self._refresh_empty_states()
 
     def _clear_dupes_table(self) -> None:
         self.dupes_table.setRowCount(0)
+        self._refresh_empty_states()
+
+    def _refresh_empty_states(self) -> None:
+        """Toggle placeholder labels for tables/logs when there is no content."""
+        self.dupes_empty_lbl.setVisible(self.dupes_table.rowCount() == 0)
+        self.logs_empty_lbl.setVisible(not bool(self.log_text.toPlainText().strip()))
+        self.similar_empty_lbl.setVisible(not bool(self.similar_text.toPlainText().strip()))
 
     def _open_duplicate_location_from_table(self, row: int, _column: int) -> None:
         first = self.dupes_table.item(row, 0)
@@ -1191,7 +1307,7 @@ QPushButton#dangerBtn:hover { background: #fee2e2; }
         self.protected_duplicate_paths -= group_paths
         self.protected_duplicate_paths |= dlg.selected_paths
         self._refresh_dupe_row(row, group_index)
-        self._log(f"Kopya grubu secimi guncellendi: {group.sha256_hash[:12]}..")
+        self._log(f"Kopya grubu seçimi güncellendi: {group.sha256_hash[:12]}..")
 
     def _refresh_dupe_row(self, row: int, group_index: int) -> None:
         if group_index < 0 or group_index >= len(self.preview_duplicate_groups):
@@ -1233,6 +1349,7 @@ QPushButton#dangerBtn:hover { background: #fee2e2; }
         r = self.dupes_table.rowCount()
         self.dupes_table.insertRow(r)
         self._refresh_dupe_row(r, group_index)
+        self._refresh_empty_states()
 
     def _set_metrics_from_summary(self, summary: OperationSummary, similar_count: int) -> None:
         self.m_total.setText(str(summary.total_files_scanned))
@@ -1241,6 +1358,15 @@ QPushButton#dangerBtn:hover { background: #fee2e2; }
         self.m_reclaim.setText(format_size(summary.duplicate_bytes_reclaimable))
         self.m_errors.setText(str(len(summary.errors)))
         self.m_similar.setText(str(similar_count))
+
+    def _reset_analysis_metrics(self) -> None:
+        """Reset live analysis cards before starting a fresh run."""
+        self.m_total.setText("0")
+        self.m_size.setText("0 B")
+        self.m_dupes.setText("0")
+        self.m_reclaim.setText("0 B")
+        self.m_errors.setText("0")
+        self.m_similar.setText("0")
 
     def _set_preview_summary(
         self,
@@ -1310,15 +1436,15 @@ QPushButton#dangerBtn:hover { background: #fee2e2; }
 
     def _confirm_apply(self, scope: ExecutionScope) -> bool:
         lines = [TR["confirm_apply_text"], ""]
-        lines.append(f"- Test modu: {'Acik' if self.dry_check.isChecked() else 'Kapali'}")
-        lines.append(f"- Kopya islemi: {self.dedupe_combo.currentText()}")
-        lines.append(f"- Dosya duzenleme: {self.mode_combo.currentText() if scope.includes_grouping else 'Yok'}")
-        lines.append(f"- Karantina kullanimi: {'Evet' if self._dedupe_enum() is DedupeMode.QUARANTINE else 'Hayir'}")
-        lines.append(f"- Dosya duzenleme uygulanacak: {'Evet' if scope.includes_grouping else 'Hayir'}")
+        lines.append(f"- Test modu: {'Açık' if self.dry_check.isChecked() else 'Kapalı'}")
+        lines.append(f"- Kopya işlemi: {self.dedupe_combo.currentText()}")
+        lines.append(f"- Dosya düzenleme: {self.mode_combo.currentText() if scope.includes_grouping else 'Yok'}")
+        lines.append(f"- Karantina kullanımı: {'Evet' if self._dedupe_enum() is DedupeMode.QUARANTINE else 'Hayır'}")
+        lines.append(f"- Dosya düzenleme uygulanacak: {'Evet' if scope.includes_grouping else 'Hayır'}")
         if self.last_result is not None:
             s = self.last_result.summary
             lines.append("")
-            lines.append("Son analiz ozeti:")
+            lines.append("Son analiz özeti:")
             lines.append(
                 self._summary_text(
                     s,
@@ -1328,7 +1454,7 @@ QPushButton#dangerBtn:hover { background: #fee2e2; }
             )
         else:
             lines.append("")
-            lines.append("Onizleme sonucu bulunamadi.")
+            lines.append("Önizleme sonucu bulunamadı.")
 
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
@@ -1366,7 +1492,7 @@ QPushButton#dangerBtn:hover { background: #fee2e2; }
                 QMessageBox.warning(
                     self,
                     TR["err"],
-                    "Islem hala devam ediyor. Lutfen once Iptal ile durdurun.",
+                    "İşlem hâlâ devam ediyor. Lütfen önce İptal ile durdurun.",
                 )
                 event.ignore()
                 return
@@ -1390,8 +1516,18 @@ def launch_gui() -> None:
     app = QApplication(sys.argv)
     app_logger.info(f"GUI started. log_file={log_path}", extra={"transaction_id": ""})
 
-    # Better fonts on macOS/Win
-    app.setFont(QFont("SF Pro Text", 11))
+    # Pick a UI font that reliably contains Turkish glyphs.
+    preferred_families = (
+        "Inter",
+        "SF Pro Text",
+        "Segoe UI",
+        "Noto Sans",
+        "DejaVu Sans",
+        "Arial",
+    )
+    available = set(QFontDatabase.families())
+    selected_family = next((family for family in preferred_families if family in available), "Sans Serif")
+    app.setFont(QFont(selected_family, 11))
 
     apply_gui_theme(app, qdarktheme)
 

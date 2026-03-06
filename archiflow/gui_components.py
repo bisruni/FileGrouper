@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -44,6 +45,54 @@ class UiFilterDraft:
     to_date: str = ""  # YYYY-MM-DD
 
 
+def create_info_banner(text: str) -> QLabel:
+    """Return a subtle helper banner label for setup hints and explanations."""
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setObjectName("infoBanner")
+    return label
+
+
+def create_empty_state_label(text: str) -> QLabel:
+    """Create a centered empty-state label used in sparse content areas."""
+    label = QLabel(text)
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    label.setWordWrap(True)
+    label.setObjectName("emptyState")
+    return label
+
+
+def create_stat_card(title: str, value_lbl: QLabel) -> QWidget:
+    """Build a polished metric card widget for summary numbers."""
+    card = QFrame()
+    card.setObjectName("statCard")
+    layout = QVBoxLayout()
+    layout.setContentsMargins(14, 12, 14, 12)
+    layout.setSpacing(4)
+    title_lbl = QLabel(title)
+    title_lbl.setObjectName("statTitle")
+    value_lbl.setObjectName("statValue")
+    layout.addWidget(title_lbl)
+    layout.addWidget(value_lbl)
+    card.setLayout(layout)
+    return card
+
+
+def apply_button_tier(button: QPushButton, tier: str) -> None:
+    """Assign visual priority style to a button.
+
+    Args:
+        button: Button to style.
+        tier: One of ``primary``, ``secondary`` or ``tertiary``.
+    """
+    mapping = {
+        "primary": "primaryBtn",
+        "secondary": "secondaryBtn",
+        "tertiary": "tertiaryBtn",
+    }
+    button.setObjectName(mapping.get(tier, "secondaryBtn"))
+
+
 class FiltersDialog(QDialog):
     """Modal dialog for editing scan filter values."""
 
@@ -69,29 +118,36 @@ class FiltersDialog(QDialog):
         self.to_date = QLineEdit(draft.to_date)
 
         form = QGridLayout()
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+
+        def add_field(row: int, col: int, title: str, widget: QLineEdit, placeholder: str = "") -> None:
+            label = QLabel(title)
+            label.setObjectName("fieldLabel")
+            if placeholder:
+                widget.setPlaceholderText(placeholder)
+            widget.setMinimumHeight(36)
+            form.addWidget(label, row, col)
+            form.addWidget(widget, row + 1, col)
+
         r = 0
-        form.addWidget(QLabel("Sadece uzantılar (örn: jpg,png,mp4)"), r, 0)
-        form.addWidget(self.include, r, 1)
-        r += 1
-        form.addWidget(QLabel("Hariç uzantılar (örn: tmp,ds_store)"), r, 0)
-        form.addWidget(self.exclude, r, 1)
-        r += 1
-        form.addWidget(QLabel("Min boyut (MB)"), r, 0)
-        form.addWidget(self.min_mb, r, 1)
-        r += 1
-        form.addWidget(QLabel("Max boyut (MB)"), r, 0)
-        form.addWidget(self.max_mb, r, 1)
-        r += 1
-        form.addWidget(QLabel("Başlangıç (YYYY-AA-GG)"), r, 0)
-        form.addWidget(self.from_date, r, 1)
-        r += 1
-        form.addWidget(QLabel("Bitiş (YYYY-AA-GG)"), r, 0)
-        form.addWidget(self.to_date, r, 1)
+        add_field(r, 0, "Sadece uzantılar", self.include, "Örn: jpg,png,mp4")
+        add_field(r, 1, "Hariç uzantılar", self.exclude, "Örn: tmp,ds_store")
+        r += 2
+        add_field(r, 0, "Min boyut (MB)", self.min_mb)
+        add_field(r, 1, "Max boyut (MB)", self.max_mb)
+        r += 2
+        add_field(r, 0, "Başlangıç tarihi (YYYY-AA-GG)", self.from_date)
+        add_field(r, 1, "Bitiş tarihi (YYYY-AA-GG)", self.to_date)
+        form.setColumnStretch(0, 1)
+        form.setColumnStretch(1, 1)
 
         btn_row = QHBoxLayout()
         btn_row.addItem(QSpacerItem(10, 10, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
         cancel = QPushButton("Vazgeç")
         save = QPushButton("Kaydet")
+        apply_button_tier(cancel, "secondary")
+        apply_button_tier(save, "primary")
         save.setDefault(True)
         btn_row.addWidget(cancel)
         btn_row.addWidget(save)
@@ -100,8 +156,10 @@ class FiltersDialog(QDialog):
         save.clicked.connect(self._save)
 
         root = QVBoxLayout()
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
+        root.addWidget(create_info_banner("Filtreler isteğe bağlıdır. Boş bırakırsanız tüm dosyalar analiz edilir."))
         root.addLayout(form)
-        root.addSpacing(10)
         root.addLayout(btn_row)
         self.setLayout(root)
 
@@ -144,10 +202,12 @@ class DuplicateGroupDialog(QDialog):
             active_keep = {str(group.files[0].full_path).lower()}
 
         root = QVBoxLayout()
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
         header = QLabel(f"Hash: {group.sha256_hash[:16]}...   Toplam dosya: {len(group.files)}")
-        header.setStyleSheet("font-weight:600;")
+        header.setObjectName("dialogTitle")
         hint = QLabel("Koru işaretli dosyalar silinmez/karantinaya alınmaz.")
-        hint.setStyleSheet("color: #6b7280;")
+        hint.setObjectName("dialogHint")
         root.addWidget(header)
         root.addWidget(hint)
 
@@ -179,6 +239,8 @@ class DuplicateGroupDialog(QDialog):
         actions.addItem(QSpacerItem(10, 10, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
         cancel = QPushButton("Vazgeç")
         save = QPushButton("Seçimi Kaydet")
+        apply_button_tier(cancel, "secondary")
+        apply_button_tier(save, "primary")
         save.setDefault(True)
         cancel.clicked.connect(self.reject)
         save.clicked.connect(self._save)
