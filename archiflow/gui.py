@@ -10,8 +10,22 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QThread, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QFont, QFontDatabase
+from PySide6.QtCore import Property, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QThread, QTimer, Slot
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QColor,
+    QFont,
+    QFontDatabase,
+    QGuiApplication,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPen,
+    QPixmap,
+    QResizeEvent,
+    QShowEvent,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -29,6 +43,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QFrame,
+    QGraphicsDropShadowEffect,
     QSizePolicy,
     QSpacerItem,
     QStackedWidget,
@@ -77,6 +92,200 @@ from .profile_service import ProfileService
 from .utils import format_size
 
 
+def create_archiflow_emblem_pixmap(size: int = 128) -> QPixmap:
+    """Create a branded ArchiFlow emblem pixmap programmatically."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    gradient = QLinearGradient(0, 0, size, size)
+    gradient.setColorAt(0.0, QColor("#2563eb"))
+    gradient.setColorAt(1.0, QColor("#1e40af"))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(gradient)
+    painter.drawRoundedRect(0, 0, size, size, size * 0.2, size * 0.2)
+
+    ring_margin = int(size * 0.08)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor("#93c5fd"), max(2, int(size * 0.03))))
+    painter.drawRoundedRect(
+        ring_margin,
+        ring_margin,
+        size - (ring_margin * 2),
+        size - (ring_margin * 2),
+        size * 0.26,
+        size * 0.26,
+    )
+
+    inner_margin = int(size * 0.20)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor("#dbeafe"), max(2, int(size * 0.035))))
+    painter.drawRoundedRect(
+        inner_margin,
+        inner_margin,
+        size - (inner_margin * 2),
+        size - (inner_margin * 2),
+        size * 0.12,
+        size * 0.12,
+    )
+
+    painter.setPen(QColor("#ffffff"))
+    text_font = QFont("Arial", max(10, int(size * 0.24)))
+    text_font.setBold(True)
+    painter.setFont(text_font)
+    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "AF")
+
+    painter.end()
+    return pixmap
+
+
+def create_archiflow_icon(size: int = 128) -> QIcon:
+    """Create a QIcon from the branded ArchiFlow emblem."""
+    pixmap = create_archiflow_emblem_pixmap(size)
+    return QIcon(pixmap)
+
+
+class StartupIntroDialog(QDialog):
+    """Short startup intro with mac-like glow and shine effect."""
+
+    class ShineLogoLabel(QLabel):
+        """Logo label that renders a moving shine over the icon."""
+
+        def __init__(self, emblem: QPixmap, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self._emblem = emblem
+            self._shine_pos = -0.8
+            self.setFixedSize(130, 130)
+
+        def _get_shine_pos(self) -> float:
+            return self._shine_pos
+
+        def _set_shine_pos(self, value: float) -> None:
+            self._shine_pos = value
+            self.update()
+
+        shinePos = Property(float, _get_shine_pos, _set_shine_pos)  # type: ignore[assignment]
+
+        def paintEvent(self, _event) -> None:  # type: ignore[override]
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+            target = QRectF(0, 0, self.width(), self.height())
+            painter.drawPixmap(target, self._emblem, QRectF(self._emblem.rect()))
+
+            # Diagonal moving light sweep over emblem.
+            gradient = QLinearGradient(
+                (self._shine_pos - 0.32) * self.width(),
+                0,
+                (self._shine_pos + 0.32) * self.width(),
+                self.height(),
+            )
+            gradient.setColorAt(0.0, QColor(255, 255, 255, 0))
+            gradient.setColorAt(0.5, QColor(255, 255, 255, 175))
+            gradient.setColorAt(1.0, QColor(255, 255, 255, 0))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
+            painter.fillRect(self.rect(), gradient)
+            painter.end()
+
+    def __init__(self, parent: QWidget | None, brand_icon: QIcon) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setModal(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setWindowOpacity(0.0)
+
+        if parent is not None:
+            self.setGeometry(parent.geometry())
+        else:
+            self.resize(760, 500)
+            screen = QGuiApplication.primaryScreen()
+            if screen is not None:
+                screen_geo = screen.availableGeometry()
+                frame = self.frameGeometry()
+                frame.moveCenter(screen_geo.center())
+                self.move(frame.topLeft())
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        center_wrap = QWidget()
+        center_layout = QVBoxLayout(center_wrap)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(10)
+        center_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        emblem_pixmap = brand_icon.pixmap(130, 130)
+        self.logo = self.ShineLogoLabel(emblem_pixmap)
+        self.logo.setObjectName("introLogo")
+        center_layout.addWidget(self.logo, 0, Qt.AlignmentFlag.AlignCenter)
+
+        title = QLabel(TR["title"])
+        title.setObjectName("introWordmark")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        center_layout.addWidget(title)
+
+        subtitle = QLabel(TR["intro_loading"])
+        subtitle.setObjectName("introStatus")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        center_layout.addWidget(subtitle)
+        root.addWidget(center_wrap)
+
+        glow = QGraphicsDropShadowEffect(self.logo)
+        glow.setBlurRadius(14.0)
+        glow.setColor(QColor(120, 180, 255, 210))
+        glow.setOffset(0, 0)
+        self.logo.setGraphicsEffect(glow)
+        self._glow_effect = glow
+
+        wordmark_glow = QGraphicsDropShadowEffect(title)
+        wordmark_glow.setBlurRadius(12.0)
+        wordmark_glow.setColor(QColor(170, 205, 255, 155))
+        wordmark_glow.setOffset(0, 0)
+        title.setGraphicsEffect(wordmark_glow)
+
+        self._fade_in = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade_in.setDuration(220)
+        self._fade_in.setStartValue(0.0)
+        self._fade_in.setEndValue(1.0)
+        self._fade_in.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._shine_anim = QPropertyAnimation(self.logo, b"shinePos", self)
+        self._shine_anim.setDuration(950)
+        self._shine_anim.setStartValue(-0.8)
+        self._shine_anim.setEndValue(1.4)
+        self._shine_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        self._glow_anim = QPropertyAnimation(self._glow_effect, b"blurRadius", self)
+        self._glow_anim.setDuration(950)
+        self._glow_anim.setStartValue(14.0)
+        self._glow_anim.setKeyValueAt(0.45, 38.0)
+        self._glow_anim.setEndValue(12.0)
+        self._glow_anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+
+        self._fade_out = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade_out.setDuration(220)
+        self._fade_out.setStartValue(1.0)
+        self._fade_out.setEndValue(0.0)
+        self._fade_out.setEasingCurve(QEasingCurve.Type.InCubic)
+        self._fade_out.finished.connect(self.accept)
+
+        self._fade_in.finished.connect(self._start_shine_cycle)
+        self._fade_in.start()
+        QTimer.singleShot(1350, self._fade_out.start)
+
+    def _start_shine_cycle(self) -> None:
+        self._shine_anim.start()
+        self._glow_anim.start()
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(6, 12, 24, 115))
+        painter.end()
+
+
 class MainWindow(QMainWindow):
     """Main desktop window coordinating user actions and pipeline runs."""
 
@@ -90,8 +299,10 @@ class MainWindow(QMainWindow):
         self.profiles: list[OperationProfile] = self.profile_service.load_profiles()
         self.engine = ArchiFlowEngine()
         self.similar_supported = self.engine.detector.is_similar_supported()
+        self.brand_icon = create_archiflow_icon(128)
 
         self.setWindowTitle(TR["title"])
+        self.setWindowIcon(self.brand_icon)
         self.setMinimumSize(1100, 720)
 
         self.filters_draft = UiFilterDraft()
@@ -149,41 +360,59 @@ class MainWindow(QMainWindow):
         welcome.setLayout(welcome_layout)
 
         welcome_layout.addStretch(1)
-        hero_card = QFrame()
-        hero_card.setObjectName("heroCard")
+        self.welcome_card = QFrame()
+        self.welcome_card.setObjectName("heroCard")
+        self.welcome_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         hero_layout = QVBoxLayout()
         hero_layout.setContentsMargins(32, 28, 32, 24)
-        hero_layout.setSpacing(12)
-        hero_card.setLayout(hero_layout)
+        hero_layout.setSpacing(14)
+        self.welcome_card.setLayout(hero_layout)
 
-        welcome_title = QLabel(TR["welcome_title"])
-        welcome_title.setProperty("role", "heroTitle")
-        welcome_title.setWordWrap(True)
-        welcome_title.setMaximumWidth(700)
-        welcome_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        welcome_subtitle = QLabel(TR["welcome_subtitle"])
-        welcome_subtitle.setWordWrap(True)
-        welcome_subtitle.setMaximumWidth(700)
-        welcome_subtitle.setMinimumHeight(58)
-        welcome_subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        welcome_subtitle.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        welcome_subtitle.setProperty("role", "heroSubtitle")
-        hero_layout.addWidget(welcome_title, 0, Qt.AlignmentFlag.AlignHCenter)
-        hero_layout.addWidget(welcome_subtitle, 0, Qt.AlignmentFlag.AlignHCenter)
-
-        badges_layout = QHBoxLayout()
-        badges_layout.setSpacing(8)
-        for badge_text in ("Güvenli Önizleme", "Karantina ile Geri Al", "Hızlı Analiz"):
-            badge = QLabel(badge_text)
-            badge.setObjectName("heroBadge")
-            badges_layout.addWidget(badge)
-        hero_layout.addLayout(badges_layout)
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(12)
+        brand_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.brand_icon_lbl = QLabel()
+        self.brand_icon_lbl.setObjectName("brandIcon")
+        self.brand_icon_lbl.setFixedSize(70, 70)
+        self.brand_icon_lbl.setPixmap(self.brand_icon.pixmap(70, 70))
+        brand_text_col = QVBoxLayout()
+        brand_text_col.setSpacing(0)
+        self.brand_wordmark_lbl = QLabel(TR["title"])
+        self.brand_wordmark_lbl.setObjectName("brandWordmark")
+        self.brand_submark_lbl = QLabel(TR["welcome_category"])
+        self.brand_submark_lbl.setObjectName("brandSubmark")
+        brand_text_col.addWidget(self.brand_wordmark_lbl)
+        brand_text_col.addWidget(self.brand_submark_lbl)
+        brand_row.addWidget(self.brand_icon_lbl)
+        brand_row.addLayout(brand_text_col)
+        hero_layout.addLayout(brand_row)
         hero_layout.addSpacing(4)
+
+        self.welcome_title_lbl = QLabel(TR["welcome_title"])
+        self.welcome_title_lbl.setProperty("role", "heroTitle")
+        self.welcome_title_lbl.setWordWrap(True)
+        self.welcome_title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.welcome_title_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.welcome_subtitle_lbl = QLabel(TR["welcome_subtitle"])
+        self.welcome_subtitle_lbl.setWordWrap(True)
+        self.welcome_subtitle_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.welcome_subtitle_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.welcome_subtitle_lbl.setProperty("role", "heroSubtitle")
+        hero_layout.addWidget(self.welcome_title_lbl)
+        hero_layout.addWidget(self.welcome_subtitle_lbl)
+
+        trust_wrap = QVBoxLayout()
+        trust_wrap.setSpacing(5)
+        for trust_text in (TR["trust_item_1"], TR["trust_item_2"], TR["trust_item_3"]):
+            trust_item = QLabel(f"✓ {trust_text}")
+            trust_item.setObjectName("trustItem")
+            trust_wrap.addWidget(trust_item, 0, Qt.AlignmentFlag.AlignHCenter)
+        hero_layout.addLayout(trust_wrap)
+        hero_layout.addSpacing(8)
 
         self.welcome_pick_btn = QPushButton(TR["welcome_pick"])
         apply_button_tier(self.welcome_pick_btn, "primary")
         self.welcome_pick_btn.setMinimumHeight(46)
-        self.welcome_pick_btn.setMinimumWidth(300)
         self.welcome_pick_btn.clicked.connect(self._pick_source_from_welcome)
         hero_layout.addWidget(self.welcome_pick_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
@@ -197,9 +426,9 @@ class MainWindow(QMainWindow):
         apply_button_tier(self.welcome_advanced_btn, "tertiary")
         self.welcome_advanced_btn.clicked.connect(lambda: self._show_setup(show_advanced=True))
         hero_layout.addWidget(self.welcome_advanced_btn, 0, Qt.AlignmentFlag.AlignHCenter)
-        hero_layout.addSpacing(2)
+        hero_layout.addSpacing(4)
 
-        welcome_layout.addWidget(hero_card, 0, Qt.AlignmentFlag.AlignHCenter)
+        welcome_layout.addWidget(self.welcome_card, 0, Qt.AlignmentFlag.AlignHCenter)
         welcome_layout.addStretch(1)
         self.view_stack.addWidget(welcome)
 
@@ -327,6 +556,7 @@ class MainWindow(QMainWindow):
         advanced_layout.addWidget(self.profile_combo, 1, 1, 1, 2)
         advanced_layout.addWidget(self.profile_apply_btn, 1, 3)
         advanced_layout.addWidget(self.filters_btn, 2, 0, 1, 2)
+        self._set_profile_controls_visible(True)
 
         setup_actions = QHBoxLayout()
         self.setup_back_btn = QPushButton(TR["back"])
@@ -340,6 +570,9 @@ class MainWindow(QMainWindow):
         setup_actions.addItem(QSpacerItem(10, 10, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
         setup_actions.addWidget(self.preview_btn)
         setup_layout.addLayout(setup_actions)
+        self.preview_safety_lbl = QLabel(TR["preview_safety_note"])
+        self.preview_safety_lbl.setObjectName("previewSafety")
+        setup_layout.addWidget(self.preview_safety_lbl, 0, Qt.AlignmentFlag.AlignRight)
         setup_layout.addStretch(1)
         self.view_stack.addWidget(setup)
 
@@ -408,6 +641,9 @@ class MainWindow(QMainWindow):
         results_title.setProperty("role", "viewTitle")
         results_layout.addWidget(results_title)
         results_layout.addWidget(create_info_banner(TR["results_hint"]))
+        self.results_gain_lbl = QLabel(TR["results_gain_placeholder"])
+        self.results_gain_lbl.setObjectName("resultsGain")
+        results_layout.addWidget(self.results_gain_lbl)
 
         preview_box = QGroupBox(TR["preview_summary"])
         preview_layout = QGridLayout()
@@ -580,6 +816,7 @@ class MainWindow(QMainWindow):
         self._set_advanced_visible(False)
         self._apply_button_icons()
         self._refresh_empty_states()
+        self._update_welcome_responsive_layout()
         self._on_workflow_changed(self.workflow_combo.currentIndex())
 
     def _apply_button_icons(self) -> None:
@@ -618,6 +855,7 @@ class MainWindow(QMainWindow):
 
     def _show_welcome(self) -> None:
         self._load_recent_source()
+        self._update_welcome_responsive_layout()
         self.view_stack.setCurrentIndex(self.page_welcome)
 
     def _show_setup(self, *, show_advanced: bool = False) -> None:
@@ -646,6 +884,22 @@ class MainWindow(QMainWindow):
             else QStyle.StandardPixmap.SP_TitleBarUnshadeButton
         )
         self.advanced_toggle_btn.setIcon(self.style().standardIcon(toggle_icon))
+
+    def _update_welcome_responsive_layout(self) -> None:
+        """Scale hero card/text width based on current window size."""
+        available_width = max(600, self.width() - 120)
+        card_width = max(620, min(1180, int(available_width * 0.90)))
+        text_width = max(520, card_width - 84)
+        primary_btn_width = max(320, min(560, card_width - 260))
+        secondary_btn_width = max(280, min(520, primary_btn_width - 30))
+        self.welcome_card.setFixedWidth(card_width)
+        self.welcome_title_lbl.setMaximumWidth(text_width)
+        self.welcome_subtitle_lbl.setMaximumWidth(text_width)
+        emblem_size = 72 if card_width >= 900 else 64
+        self.brand_icon_lbl.setFixedSize(emblem_size, emblem_size)
+        self.brand_icon_lbl.setPixmap(self.brand_icon.pixmap(emblem_size, emblem_size))
+        self.welcome_pick_btn.setFixedWidth(primary_btn_width)
+        self.welcome_recent_btn.setFixedWidth(secondary_btn_width)
 
     def _pick_source_from_welcome(self) -> None:
         path = QFileDialog.getExistingDirectory(self, TR["source"])
@@ -807,8 +1061,15 @@ class MainWindow(QMainWindow):
         for profile in self.profiles:
             self.profile_combo.addItem(profile.name)
         has_profiles = bool(self.profiles)
+        self._set_profile_controls_visible(has_profiles)
         self.profile_combo.setEnabled(has_profiles)
         self.profile_apply_btn.setEnabled(has_profiles)
+
+    def _set_profile_controls_visible(self, visible: bool) -> None:
+        """Hide advanced profile widgets when no saved profiles exist."""
+        self.profile_lbl.setVisible(visible)
+        self.profile_combo.setVisible(visible)
+        self.profile_apply_btn.setVisible(visible)
 
     def _apply_startup_defaults(self) -> None:
         """Apply resolved config defaults and optional default profile."""
@@ -1383,6 +1644,7 @@ class MainWindow(QMainWindow):
             self.p_organize.setText("0")
             self.p_errors.setText("0")
             self.p_skipped.setText("0")
+            self.results_gain_lbl.setText(TR["results_gain_placeholder"])
             return
         self.p_total.setText(str(summary.total_files_scanned))
         self.p_dupes.setText(str(summary.duplicate_files_found))
@@ -1392,6 +1654,14 @@ class MainWindow(QMainWindow):
         self.p_organize.setText(str(organize_count))
         self.p_errors.setText(str(len(summary.errors)))
         self.p_skipped.setText(str(len(summary.skipped_files)))
+        if summary.duplicate_bytes_reclaimable > 0:
+            self.results_gain_lbl.setText(
+                f"{format_size(summary.duplicate_bytes_reclaimable)} kazanılabilir alan bulundu"
+            )
+        elif summary.duplicate_files_found > 0:
+            self.results_gain_lbl.setText(f"{summary.duplicate_files_found} gereksiz kopya bulundu")
+        else:
+            self.results_gain_lbl.setText("Gereksiz kopya bulunmadı. Klasörünüz düzenli görünüyor.")
 
     def _summary_text(
         self,
@@ -1499,6 +1769,16 @@ class MainWindow(QMainWindow):
 
         super().closeEvent(event)
 
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        """Keep welcome hero responsive across window sizes."""
+        self._update_welcome_responsive_layout()
+        super().resizeEvent(event)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        """Apply responsive sizing once the window is actually shown."""
+        self._update_welcome_responsive_layout()
+        super().showEvent(event)
+
 
 def launch_gui() -> None:
     """Create Qt application, apply theme and start event loop.
@@ -1514,6 +1794,7 @@ def launch_gui() -> None:
     log_path = configure_logging(log_dir=app_config.log_dir, level=app_config.log_level or None)
     app_logger = get_logger("gui")
     app = QApplication(sys.argv)
+    app.setWindowIcon(create_archiflow_icon(256))
     app_logger.info(f"GUI started. log_file={log_path}", extra={"transaction_id": ""})
 
     # Pick a UI font that reliably contains Turkish glyphs.
@@ -1532,6 +1813,7 @@ def launch_gui() -> None:
     apply_gui_theme(app, qdarktheme)
 
     w = MainWindow()
+    StartupIntroDialog(None, w.brand_icon).exec()
     w.show()
     sys.exit(app.exec())
 

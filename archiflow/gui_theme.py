@@ -9,18 +9,33 @@ from PySide6.QtWidgets import QApplication
 FALLBACK_STYLESHEET = """
 QWidget { background: #f5f7fa; color: #0f172a; font-size: 13px; }
 QMainWindow { background: #f5f7fa; }
-QLabel { color: #1f2937; }
+QLabel { color: #1f2937; background: transparent; }
 QLabel[role="heroTitle"] { font-size: 34px; font-weight: 800; color: #0b1220; letter-spacing: 0.2px; }
 QLabel[role="heroSubtitle"] { font-size: 15px; color: #475569; }
+QLabel[role="welcomeCategory"] { font-size: 13px; color: #2563eb; font-weight: 700; letter-spacing: 0.4px; }
 QLabel[role="viewTitle"] { font-size: 27px; font-weight: 700; color: #0f172a; }
 QLabel[role="viewSubtitle"] { font-size: 14px; color: #64748b; }
+QLabel#brandWordmark { font-size: 30px; font-weight: 900; color: #0b1220; letter-spacing: 0.3px; }
+QLabel#brandSubmark { font-size: 12px; color: #64748b; font-weight: 600; }
+QLabel#brandIcon { background: transparent; }
+QLabel#introWordmark { font-size: 34px; font-weight: 900; color: #ffffff; letter-spacing: 0.3px; }
+QLabel#introStatus { font-size: 13px; color: #c9d7ef; font-weight: 600; }
 QLabel#fieldLabel { color: #475569; font-size: 12px; font-weight: 600; }
+QLabel#trustItem { font-size: 13px; color: #1e3a8a; font-weight: 600; padding: 1px 0; }
+QLabel#previewSafety { font-size: 12px; color: #64748b; font-weight: 600; }
+QLabel#resultsGain {
+    font-size: 20px;
+    color: #0f172a;
+    font-weight: 800;
+    background: #eef6ff;
+    border: 1px solid #cfe3fb;
+    border-radius: 12px;
+    padding: 10px 12px;
+}
 QFrame#heroCard {
     background: #ffffff;
     border: 1px solid #e2e8f0;
     border-radius: 16px;
-    min-width: 760px;
-    max-width: 860px;
 }
 QLabel#heroBadge {
     background: #f8fafc;
@@ -199,12 +214,26 @@ QPushButton#tertiaryBtn:hover { background: #eef2ff; color: #1d4ed8; }
 QPushButton#dangerBtn { background: #fff5f5; color: #b91c1c; border: 1px solid #fecaca; }
 QPushButton#dangerBtn:hover { background: #fee2e2; border-color: #fca5a5; }
 QLabel#fieldLabel { color: #475569; font-size: 12px; font-weight: 600; }
+QLabel#brandWordmark { font-size: 30px; font-weight: 900; color: #0b1220; letter-spacing: 0.3px; }
+QLabel#brandSubmark { font-size: 12px; color: #64748b; font-weight: 600; }
+QLabel#brandIcon { background: transparent; }
+QLabel#introWordmark { font-size: 34px; font-weight: 900; color: #ffffff; letter-spacing: 0.3px; }
+QLabel#introStatus { font-size: 13px; color: #c9d7ef; font-weight: 600; }
+QLabel#trustItem { font-size: 13px; color: #1e3a8a; font-weight: 600; }
+QLabel#previewSafety { font-size: 12px; color: #64748b; font-weight: 600; }
+QLabel#resultsGain {
+    font-size: 20px;
+    color: #0f172a;
+    font-weight: 800;
+    background: #eef6ff;
+    border: 1px solid #cfe3fb;
+    border-radius: 12px;
+    padding: 10px 12px;
+}
 QFrame#heroCard {
     background: #ffffff;
     border: 1px solid #e2e8f0;
     border-radius: 16px;
-    min-width: 760px;
-    max-width: 860px;
 }
 QLabel#heroBadge {
     background: #f8fafc;
@@ -237,8 +266,9 @@ QLabel#emptyState {
     padding: 12px;
     background: #f8fafc;
 }
-QLabel[role="heroTitle"] { font-size: 34px; font-weight: 800; color: #0b1220; }
+QLabel[role="heroTitle"] { font-size: 34px; font-weight: 800; color: #0b1220; line-height: 1.22; }
 QLabel[role="heroSubtitle"] { font-size: 15px; color: #475569; }
+QLabel[role="welcomeCategory"] { font-size: 13px; color: #2563eb; font-weight: 700; letter-spacing: 0.4px; }
 QLabel[role="viewTitle"] { font-size: 27px; font-weight: 700; color: #0f172a; }
 QLabel[role="viewSubtitle"] { font-size: 14px; color: #64748b; }
 """
